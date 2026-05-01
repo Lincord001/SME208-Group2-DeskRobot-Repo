@@ -1,0 +1,21 @@
+#ifndef WIFI_NETWORK_H
+#define WIFI_NETWORK_H
+
+#include <stdbool.h>
+
+#include <esp_err.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+esp_err_t wifi_network_init(void);
+esp_err_t wifi_network_start(void);
+bool wifi_network_is_connected(void);
+const char *wifi_network_get_status_string(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // WIFI_NETWORK_H

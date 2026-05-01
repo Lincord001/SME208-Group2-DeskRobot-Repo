@@ -16,6 +16,7 @@ typedef enum {
     DISPLAY_STATE_LISTENING,
     DISPLAY_STATE_THINKING,
     DISPLAY_STATE_ANSWERING,
+    DISPLAY_STATE_WIFI,
     DISPLAY_STATE_ERROR,
 } display_state_t;
 
@@ -32,6 +33,7 @@ void display_set_idle(void);
 void display_set_listening(uint32_t sec);
 void display_set_thinking(uint32_t sec);
 void display_set_answering(uint32_t current_sec, uint32_t total_sec);
+void display_set_wifi_status(const char *status);
 void display_set_error(void);
 
 #ifdef __cplusplus

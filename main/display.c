@@ -49,6 +49,7 @@ typedef struct {
     uint32_t elapsed_sec;
     uint32_t total_sec;
     TickType_t state_start_tick;
+    char wifi_status[32];
 } display_status_t;
 
 static SemaphoreHandle_t s_state_mutex;
@@ -169,6 +170,12 @@ static void display_format_text(const display_status_t *status,
         } else {
             snprintf(detail, detail_size, "%lu sec", (unsigned long)elapsed);
         }
+        break;
+
+    case DISPLAY_STATE_WIFI:
+        snprintf(title, title_size, "WiFi");
+        snprintf(detail, detail_size, "%s",
+                 status->wifi_status[0] != '\0' ? status->wifi_status : "init");
         break;
 
     case DISPLAY_STATE_ERROR:
@@ -470,6 +477,31 @@ void display_set_thinking(uint32_t sec)
 void display_set_answering(uint32_t current_sec, uint32_t total_sec)
 {
     display_update_state(DISPLAY_STATE_ANSWERING, current_sec, total_sec);
+}
+
+void display_set_wifi_status(const char *status)
+{
+    if (!s_initialized || status == NULL) {
+        return;
+    }
+
+    if (s_state_mutex == NULL) {
+        return;
+    }
+
+    if (xSemaphoreTake(s_state_mutex, portMAX_DELAY) == pdTRUE) {
+        if (s_status.state == DISPLAY_STATE_IDLE ||
+            s_status.state == DISPLAY_STATE_WIFI ||
+            s_status.state == DISPLAY_STATE_ERROR) {
+            s_status.state = DISPLAY_STATE_WIFI;
+            s_status.elapsed_sec = 0;
+            s_status.total_sec = 0;
+            s_status.state_start_tick = xTaskGetTickCount();
+            snprintf(s_status.wifi_status, sizeof(s_status.wifi_status),
+                     "%s", status);
+        }
+        xSemaphoreGive(s_state_mutex);
+    }
 }
 
 void display_set_error(void)

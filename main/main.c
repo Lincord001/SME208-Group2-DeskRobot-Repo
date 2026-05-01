@@ -27,6 +27,7 @@
 #include "key.h"
 #include "led.h"
 #include "servo.h"
+#include "wifi_network.h"
 
 static const char *TAG = "MAIN";
 
@@ -181,6 +182,16 @@ void app_main(void)
         }
     } else {
         ESP_LOGW(TAG, "display_init: %s", esp_err_to_name(err));
+    }
+
+    err = wifi_network_init();
+    if (err == ESP_OK) {
+        err = wifi_network_start();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "wifi_network_start: %s", esp_err_to_name(err));
+        }
+    } else {
+        ESP_LOGW(TAG, "wifi_network_init: %s", esp_err_to_name(err));
     }
 
     /* 2. LED 呼吸灯 */
