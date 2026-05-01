@@ -102,8 +102,17 @@ static void main_key_task(void *arg)
             break;
 
         case 8: /* K8：切换播放音量挡位 */
-            audio_spk_cycle_volume_level();
-            ESP_LOGI(TAG, "K8: volume level switched");
+            if (msg.event == LED_KEY_EVENT_LONG_PRESS_START) {
+                err = wifi_network_start_config_mode(false);
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "K8: WiFi config mode rejected (%s)", esp_err_to_name(err));
+                } else {
+                    ESP_LOGI(TAG, "K8: WiFi config mode started");
+                }
+            } else {
+                audio_spk_cycle_volume_level();
+                ESP_LOGI(TAG, "K8: volume level switched");
+            }
             break;
 
         case 7: /* K7: full ASR->LLM->TTS test, or TTS smoke test if no audio */

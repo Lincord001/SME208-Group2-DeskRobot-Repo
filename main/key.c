@@ -23,6 +23,9 @@
 #define KEY_7_GPIO 21
 #define KEY_8_GPIO 45
 
+#define KEY_WIFI_CONFIG_ID 8
+#define KEY_WIFI_CONFIG_LONG_PRESS_MS 3000
+
 typedef struct {
     uint8_t key_id;
     QueueHandle_t event_queue;
@@ -45,7 +48,7 @@ static key_ctx_t s_key_ctx[KEY_COUNT];
 static button_handle_t s_button_handles[KEY_COUNT];
 static bool s_is_initialized;
 
-static void key_press_down_cb(void *button_handle, void *usr_data)
+static void key_send_event(void *button_handle, void *usr_data, led_key_event_t event)
 {
     (void)button_handle;
 
@@ -56,12 +59,27 @@ static void key_press_down_cb(void *button_handle, void *usr_data)
 
     led_key_event_message_t msg = {
         .key_id = ctx->key_id,
-        .event = LED_KEY_EVENT_PRESS_DOWN,
+        .event = event,
     };
 
     if (xQueueSend(ctx->event_queue, &msg, 0) != pdPASS) {
         ESP_LOGW(TAG, "Event queue full, dropped key %u", ctx->key_id);
     }
+}
+
+static void key_press_down_cb(void *button_handle, void *usr_data)
+{
+    key_send_event(button_handle, usr_data, LED_KEY_EVENT_PRESS_DOWN);
+}
+
+static void key_single_click_cb(void *button_handle, void *usr_data)
+{
+    key_send_event(button_handle, usr_data, LED_KEY_EVENT_SINGLE_CLICK);
+}
+
+static void key_long_press_start_cb(void *button_handle, void *usr_data)
+{
+    key_send_event(button_handle, usr_data, LED_KEY_EVENT_LONG_PRESS_START);
 }
 
 static void key_cleanup_created_buttons(size_t count)
@@ -87,7 +105,7 @@ esp_err_t key_init(QueueHandle_t led_event_queue)
     }
 
     button_config_t button_cfg = {
-        .long_press_time = 0,
+        .long_press_time = KEY_WIFI_CONFIG_LONG_PRESS_MS,
         .short_press_time = 0,
     };
 
@@ -110,12 +128,33 @@ esp_err_t key_init(QueueHandle_t led_event_queue)
             return err;
         }
 
-        err = iot_button_register_cb(s_button_handles[i], BUTTON_PRESS_DOWN, NULL, key_press_down_cb, &s_key_ctx[i]);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to register callback for key %u: %s",
-                     (unsigned)(i + 1), esp_err_to_name(err));
-            key_cleanup_created_buttons(i + 1);
-            return err;
+        if (s_key_ctx[i].key_id == KEY_WIFI_CONFIG_ID) {
+            err = iot_button_register_cb(s_button_handles[i], BUTTON_SINGLE_CLICK, NULL,
+                                         key_single_click_cb, &s_key_ctx[i]);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to register single-click callback for key %u: %s",
+                         (unsigned)(i + 1), esp_err_to_name(err));
+                key_cleanup_created_buttons(i + 1);
+                return err;
+            }
+
+            err = iot_button_register_cb(s_button_handles[i], BUTTON_LONG_PRESS_START, NULL,
+                                         key_long_press_start_cb, &s_key_ctx[i]);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to register long-press callback for key %u: %s",
+                         (unsigned)(i + 1), esp_err_to_name(err));
+                key_cleanup_created_buttons(i + 1);
+                return err;
+            }
+        } else {
+            err = iot_button_register_cb(s_button_handles[i], BUTTON_PRESS_DOWN, NULL,
+                                         key_press_down_cb, &s_key_ctx[i]);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to register callback for key %u: %s",
+                         (unsigned)(i + 1), esp_err_to_name(err));
+                key_cleanup_created_buttons(i + 1);
+                return err;
+            }
         }
     }
 

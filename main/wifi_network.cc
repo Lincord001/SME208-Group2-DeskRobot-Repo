@@ -237,6 +237,29 @@ esp_err_t wifi_network_start(void)
     return ESP_OK;
 }
 
+esp_err_t wifi_network_start_config_mode(bool clear_saved)
+{
+    esp_err_t err = wifi_network_init();
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    auto& wifi = WifiManager::GetInstance();
+
+    if (clear_saved) {
+        ESP_LOGI(TAG, "Clearing saved WiFi credentials before config mode");
+        SsidManager::GetInstance().Clear();
+    }
+
+    s_started_with_saved_config = false;
+    s_connected = false;
+    wifi_network_set_status("config mode");
+    ESP_LOGI(TAG, "Starting WiFi config mode by request");
+    wifi.StartConfigAp();
+
+    return ESP_OK;
+}
+
 bool wifi_network_is_connected(void)
 {
     return s_connected && WifiManager::GetInstance().IsConnected();

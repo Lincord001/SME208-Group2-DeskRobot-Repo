@@ -9,6 +9,8 @@
 
 typedef enum {
     LED_KEY_EVENT_PRESS_DOWN = 0,
+    LED_KEY_EVENT_SINGLE_CLICK,
+    LED_KEY_EVENT_LONG_PRESS_START,
 } led_key_event_t;
 
 typedef struct {
