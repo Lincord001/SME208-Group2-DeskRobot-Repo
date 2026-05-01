@@ -50,6 +50,8 @@ typedef struct {
     uint32_t total_sec;
     TickType_t state_start_tick;
     char wifi_status[32];
+    char status_title[24];
+    char status_detail[32];
 } display_status_t;
 
 static SemaphoreHandle_t s_state_mutex;
@@ -176,6 +178,13 @@ static void display_format_text(const display_status_t *status,
         snprintf(title, title_size, "WiFi");
         snprintf(detail, detail_size, "%s",
                  status->wifi_status[0] != '\0' ? status->wifi_status : "init");
+        break;
+
+    case DISPLAY_STATE_STATUS:
+        snprintf(title, title_size, "%s",
+                 status->status_title[0] != '\0' ? status->status_title : "Status");
+        snprintf(detail, detail_size, "%s",
+                 status->status_detail[0] != '\0' ? status->status_detail : "");
         break;
 
     case DISPLAY_STATE_ERROR:
@@ -477,6 +486,36 @@ void display_set_thinking(uint32_t sec)
 void display_set_answering(uint32_t current_sec, uint32_t total_sec)
 {
     display_update_state(DISPLAY_STATE_ANSWERING, current_sec, total_sec);
+}
+
+void display_set_status(const char *title, const char *detail)
+{
+    if (!s_initialized || title == NULL) {
+        return;
+    }
+
+    if (s_state_mutex == NULL) {
+        return;
+    }
+
+    if (xSemaphoreTake(s_state_mutex, portMAX_DELAY) == pdTRUE) {
+        if (s_status.state == DISPLAY_STATE_IDLE ||
+            s_status.state == DISPLAY_STATE_LISTENING ||
+            s_status.state == DISPLAY_STATE_WIFI ||
+            s_status.state == DISPLAY_STATE_STATUS ||
+            s_status.state == DISPLAY_STATE_THINKING ||
+            s_status.state == DISPLAY_STATE_ERROR) {
+            s_status.state = DISPLAY_STATE_STATUS;
+            s_status.elapsed_sec = 0;
+            s_status.total_sec = 0;
+            s_status.state_start_tick = xTaskGetTickCount();
+            snprintf(s_status.status_title, sizeof(s_status.status_title),
+                     "%s", title);
+            snprintf(s_status.status_detail, sizeof(s_status.status_detail),
+                     "%s", detail != NULL ? detail : "");
+        }
+        xSemaphoreGive(s_state_mutex);
+    }
 }
 
 void display_set_wifi_status(const char *status)

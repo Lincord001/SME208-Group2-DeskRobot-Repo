@@ -79,3 +79,7 @@ Desktop.ini
 *.workspace # General workspace files, can be from various tools
 *.suo       # Visual Studio Solution User Options
 *.sln.docstates # Visual Studio
+
+# Local API references and secrets
+main/api_referenece/
+main/api_config_private.h

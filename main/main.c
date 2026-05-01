@@ -27,6 +27,7 @@
 #include "key.h"
 #include "led.h"
 #include "servo.h"
+#include "voice_assistant.h"
 #include "wifi_network.h"
 
 static const char *TAG = "MAIN";
@@ -71,7 +72,7 @@ static void main_key_task(void *arg)
                 }
             } else {
                 audio_mic_set_recording(false);
-                display_set_thinking(0);
+                display_set_status("Recorded", "Press K7");
                 ESP_LOGI(TAG, "K1: recording stopped");
             }
             break;
@@ -103,6 +104,18 @@ static void main_key_task(void *arg)
         case 8: /* K8：切换播放音量挡位 */
             audio_spk_cycle_volume_level();
             ESP_LOGI(TAG, "K8: volume level switched");
+            break;
+
+        case 7: /* K7: full ASR->LLM->TTS test, or TTS smoke test if no audio */
+            if (s_audio_buf.recording_complete && s_audio_buf.recorded_size > 0 &&
+                !s_audio_buf.recording && !s_audio_buf.playing) {
+                err = voice_assistant_start_full_test(&s_audio_buf, AUDIO_SAMPLE_RATE);
+            } else {
+                err = voice_assistant_start_tts_test(&s_audio_buf);
+            }
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "K7: voice test rejected (%s)", esp_err_to_name(err));
+            }
             break;
 
         case 3: /* K3：垂直舵机 -10° */
@@ -192,6 +205,11 @@ void app_main(void)
         }
     } else {
         ESP_LOGW(TAG, "wifi_network_init: %s", esp_err_to_name(err));
+    }
+
+    err = voice_assistant_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "voice_assistant_init: %s", esp_err_to_name(err));
     }
 
     /* 2. LED 呼吸灯 */

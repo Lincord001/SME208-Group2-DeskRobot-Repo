@@ -1,0 +1,194 @@
+#include "llm_client.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <cJSON.h>
+#include <esp_crt_bundle.h>
+#include <esp_http_client.h>
+#include <esp_log.h>
+
+#include "api_config.h"
+
+#define LLM_RESPONSE_BUFFER_BYTES (16 * 1024)
+
+static const char *TAG = "llm_client";
+
+typedef struct {
+    char *data;
+    size_t len;
+    size_t cap;
+} llm_http_response_t;
+
+static esp_err_t llm_http_event_handler(esp_http_client_event_t *evt)
+{
+    if (evt->event_id != HTTP_EVENT_ON_DATA || evt->data == NULL || evt->data_len <= 0) {
+        return ESP_OK;
+    }
+
+    llm_http_response_t *response = (llm_http_response_t *)evt->user_data;
+    if (response == NULL || response->data == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    size_t copy_len = (size_t)evt->data_len;
+    if (response->len + copy_len >= response->cap) {
+        copy_len = response->cap - response->len - 1;
+    }
+
+    if (copy_len > 0) {
+        memcpy(response->data + response->len, evt->data, copy_len);
+        response->len += copy_len;
+        response->data[response->len] = '\0';
+    }
+
+    return ESP_OK;
+}
+
+static char *llm_build_request_body(const char *user_text)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON *messages = cJSON_CreateArray();
+    cJSON *message = cJSON_CreateObject();
+    cJSON *extra_body = cJSON_CreateObject();
+    if (root == NULL || messages == NULL || message == NULL || extra_body == NULL) {
+        goto fail;
+    }
+
+    cJSON_AddStringToObject(root, "model", api_config_get_llm_model());
+    cJSON_AddBoolToObject(root, "stream", false);
+    cJSON_AddBoolToObject(extra_body, "enable_thinking", false);
+    cJSON_AddItemToObject(root, "extra_body", extra_body);
+    extra_body = NULL;
+
+    cJSON_AddStringToObject(message, "role", "user");
+    cJSON_AddStringToObject(message, "content", user_text);
+    cJSON_AddItemToArray(messages, message);
+    message = NULL;
+    cJSON_AddItemToObject(root, "messages", messages);
+    messages = NULL;
+
+    char *body = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return body;
+
+fail:
+    cJSON_Delete(root);
+    cJSON_Delete(messages);
+    cJSON_Delete(message);
+    cJSON_Delete(extra_body);
+    return NULL;
+}
+
+static esp_err_t llm_parse_reply(const char *response_json, char *out_reply, size_t out_reply_len)
+{
+    cJSON *root = cJSON_Parse(response_json);
+    if (root == NULL) {
+        ESP_LOGE(TAG, "Failed to parse LLM JSON response");
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    const cJSON *choices = cJSON_GetObjectItem(root, "choices");
+    const cJSON *choice = cJSON_IsArray(choices) ? cJSON_GetArrayItem(choices, 0) : NULL;
+    const cJSON *message = choice != NULL ? cJSON_GetObjectItem(choice, "message") : NULL;
+    const cJSON *content = message != NULL ? cJSON_GetObjectItem(message, "content") : NULL;
+
+    if (!cJSON_IsString(content) || content->valuestring == NULL || content->valuestring[0] == '\0') {
+        const cJSON *error = cJSON_GetObjectItem(root, "error");
+        const cJSON *error_message = error != NULL ? cJSON_GetObjectItem(error, "message") : NULL;
+        if (cJSON_IsString(error_message) && error_message->valuestring != NULL) {
+            ESP_LOGE(TAG, "LLM API error: %s", error_message->valuestring);
+        } else {
+            ESP_LOGE(TAG, "LLM response has no choices[0].message.content");
+        }
+        cJSON_Delete(root);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    snprintf(out_reply, out_reply_len, "%s", content->valuestring);
+    cJSON_Delete(root);
+    return ESP_OK;
+}
+
+esp_err_t llm_client_init(void)
+{
+    if (!api_config_has_dashscope_api_key()) {
+        ESP_LOGW(TAG, "DashScope API key is not configured");
+    }
+    return ESP_OK;
+}
+
+esp_err_t llm_client_chat(const char *user_text, char *out_reply, size_t out_reply_len)
+{
+    if (user_text == NULL || out_reply == NULL || out_reply_len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    out_reply[0] = '\0';
+
+    if (!api_config_has_dashscope_api_key()) {
+        ESP_LOGE(TAG, "Missing API key. Create main/api_config_private.h from the example file.");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    char *request_body = llm_build_request_body(user_text);
+    if (request_body == NULL) {
+        ESP_LOGE(TAG, "Failed to build LLM request body");
+        return ESP_ERR_NO_MEM;
+    }
+
+    llm_http_response_t response = {
+        .data = (char *)calloc(1, LLM_RESPONSE_BUFFER_BYTES),
+        .len = 0,
+        .cap = LLM_RESPONSE_BUFFER_BYTES,
+    };
+    if (response.data == NULL) {
+        free(request_body);
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_http_client_config_t config = {
+        .url = api_config_get_llm_url(),
+        .event_handler = llm_http_event_handler,
+        .user_data = &response,
+        .timeout_ms = api_config_get_http_timeout_ms(),
+        .crt_bundle_attach = esp_crt_bundle_attach,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == NULL) {
+        free(request_body);
+        free(response.data);
+        return ESP_FAIL;
+    }
+
+    char auth_header[192];
+    snprintf(auth_header, sizeof(auth_header), "Bearer %s", api_config_get_dashscope_api_key());
+
+    esp_http_client_set_method(client, HTTP_METHOD_POST);
+    esp_http_client_set_header(client, "Authorization", auth_header);
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, request_body, (int)strlen(request_body));
+
+    ESP_LOGI(TAG, "POST %s model=%s", api_config_get_llm_url(), api_config_get_llm_model());
+    esp_err_t err = esp_http_client_perform(client);
+    int status_code = esp_http_client_get_status_code(client);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "HTTP status=%d response_len=%u", status_code, (unsigned)response.len);
+        if (status_code >= 200 && status_code < 300) {
+            err = llm_parse_reply(response.data, out_reply, out_reply_len);
+        } else {
+            ESP_LOGE(TAG, "LLM HTTP request failed with status %d: %s", status_code, response.data);
+            err = ESP_FAIL;
+        }
+    } else {
+        ESP_LOGE(TAG, "LLM HTTP request failed: %s", esp_err_to_name(err));
+    }
+
+    esp_http_client_cleanup(client);
+    free(request_body);
+    free(response.data);
+    return err;
+}
