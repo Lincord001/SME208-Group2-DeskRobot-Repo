@@ -23,6 +23,7 @@
 
 #include "audio_mic.h"
 #include "audio_spk.h"
+#include "display.h"
 #include "key.h"
 #include "led.h"
 #include "servo.h"
@@ -64,10 +65,12 @@ static void main_key_task(void *arg)
                     ESP_LOGW(TAG, "K1: stop playback first");
                 } else {
                     audio_mic_set_recording(true);
+                    display_set_listening(0);
                     ESP_LOGI(TAG, "K1: recording started");
                 }
             } else {
                 audio_mic_set_recording(false);
+                display_set_thinking(0);
                 ESP_LOGI(TAG, "K1: recording stopped");
             }
             break;
@@ -79,6 +82,9 @@ static void main_key_task(void *arg)
                 } else {
                     esp_err_t play_err = audio_spk_set_playing(true);
                     if (play_err == ESP_OK) {
+                        uint32_t total_sec = (uint32_t)((s_audio_buf.recorded_size / sizeof(int16_t)) /
+                                                        AUDIO_SAMPLE_RATE);
+                        display_set_answering(0, total_sec);
                         ESP_LOGI(TAG, "K2: playback started");
                     } else {
                         ESP_LOGW(TAG, "K2: playback start rejected");
@@ -87,6 +93,7 @@ static void main_key_task(void *arg)
             } else {
                 esp_err_t play_err = audio_spk_set_playing(false);
                 if (play_err == ESP_OK) {
+                    display_set_idle();
                     ESP_LOGI(TAG, "K2: playback stopped");
                 }
             }
@@ -161,6 +168,20 @@ void app_main(void)
     s_audio_buf.playing             = false;
     s_audio_buf.recording_complete  = false;
     ESP_LOGI(TAG, "PSRAM buffer allocated: %u bytes", (unsigned)AUDIO_BUF_BYTES);
+
+    /* OLED display is non-critical: log failures and keep audio/key features running. */
+    err = display_init();
+    if (err == ESP_OK) {
+        display_attach_audio_buffer(&s_audio_buf, AUDIO_SAMPLE_RATE);
+        err = display_start_task();
+        if (err == ESP_OK) {
+            display_set_idle();
+        } else {
+            ESP_LOGW(TAG, "display_start_task: %s", esp_err_to_name(err));
+        }
+    } else {
+        ESP_LOGW(TAG, "display_init: %s", esp_err_to_name(err));
+    }
 
     /* 2. LED 呼吸灯 */
     err = led_start_breath_effect();
