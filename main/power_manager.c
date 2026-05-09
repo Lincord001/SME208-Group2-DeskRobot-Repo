@@ -5,6 +5,7 @@
 #include <esp_clk_tree.h>
 #include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <esp_pm.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -12,6 +13,7 @@
 
 #include "display.h"
 #include "led.h"
+#include "servo.h"
 #include "wifi_network.h"
 
 #define POWER_STAGE1_IDLE_MS 10000
@@ -36,6 +38,7 @@ static volatile bool s_initialized;
 static volatile power_stage_t s_stage = POWER_STAGE_AWAKE;
 static TickType_t s_last_activity_tick;
 static TickType_t s_last_observe_log_tick;
+static bool s_cpu_low_freq_limited;
 
 static const char *power_manager_stage_to_string(power_stage_t stage)
 {
@@ -97,6 +100,38 @@ static const char *power_manager_display_state_to_string(display_state_t state)
     }
 }
 
+static esp_err_t power_manager_apply_cpu_limit(bool enable)
+{
+#if CONFIG_PM_ENABLE
+    if (s_cpu_low_freq_limited == enable) {
+        return ESP_OK;
+    }
+
+    esp_pm_config_t pm_config = {
+        .max_freq_mhz = enable ? POWER_MIN_CPU_FREQ_MHZ : CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+        .min_freq_mhz = POWER_MIN_CPU_FREQ_MHZ,
+        .light_sleep_enable = false,
+    };
+
+    esp_err_t err = esp_pm_configure(&pm_config);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "CPU low frequency limit %s failed: %s",
+                 enable ? "enable" : "disable",
+                 esp_err_to_name(err));
+        return err;
+    }
+
+    s_cpu_low_freq_limited = enable;
+    ESP_LOGI(TAG, "CPU frequency range set to %u-%u MHz",
+             (unsigned)pm_config.min_freq_mhz,
+             (unsigned)pm_config.max_freq_mhz);
+    return ESP_OK;
+#else
+    (void)enable;
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+
 static void power_manager_log_observability(const char *reason)
 {
     audio_buffer_state_t audio_state = {0};
@@ -105,20 +140,21 @@ static void power_manager_log_observability(const char *reason)
     }
 
     ESP_LOGI(TAG,
-             "Power observe (%s): stage=%s display=%s wifi=%s wifi_ps=%s cpu=%luMHz pm=%s(%u-%uMHz) audio=rec:%u play:%u complete:%u bytes:%u/%u heap=%u psram=%u",
+             "Power observe (%s): stage=%s display=%s wifi=%s wifi_ps=%s cpu=%luMHz cpu_limit=%s pm=%s(%u-%uMHz) audio=rec:%u play:%u complete:%u bytes:%u/%u heap=%u psram=%u",
              reason != NULL ? reason : "snapshot",
              power_manager_stage_to_string(s_stage),
              power_manager_display_state_to_string(display_get_state()),
              wifi_network_get_status_string(),
              wifi_network_is_power_save_enabled() ? "on" : "off",
              (unsigned long)power_manager_get_cpu_freq_mhz(),
+             s_cpu_low_freq_limited ? "80MHz" : "auto",
 #if CONFIG_PM_ENABLE
              "on",
 #else
              "off",
 #endif
              (unsigned)POWER_MIN_CPU_FREQ_MHZ,
-             (unsigned)CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+             (unsigned)(s_cpu_low_freq_limited ? POWER_MIN_CPU_FREQ_MHZ : CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ),
              audio_state.recording ? 1U : 0U,
              audio_state.playing ? 1U : 0U,
              audio_state.recording_complete ? 1U : 0U,
@@ -136,6 +172,8 @@ static void power_manager_set_stage(power_stage_t stage)
 
     switch (stage) {
     case POWER_STAGE_AWAKE:
+        (void)power_manager_apply_cpu_limit(false);
+        servo_center();
         (void)wifi_network_set_power_save(false);
         display_set_panel_power(true);
         display_set_low_power_overlay(false);
@@ -144,6 +182,7 @@ static void power_manager_set_stage(power_stage_t stage)
         break;
 
     case POWER_STAGE_SLEEPY:
+        servo_center();
         led_set_low_power(true);
         display_set_panel_power(true);
         display_set_low_power_overlay(true);
@@ -151,12 +190,14 @@ static void power_manager_set_stage(power_stage_t stage)
         break;
 
     case POWER_STAGE_DISPLAY_OFF:
+        servo_look_down();
         display_set_low_power_overlay(false);
         display_set_panel_power(false);
         led_set_low_power(true);
         if (wifi_network_is_connected()) {
             (void)wifi_network_set_power_save(true);
         }
+        (void)power_manager_apply_cpu_limit(true);
         ESP_LOGI(TAG, "Power stage: display off");
         break;
     }

@@ -102,10 +102,16 @@ static void main_key_task(void *arg)
                 } else {
                     audio_mic_set_recording(true);
                     display_set_listening(0);
+                    err = servo_start_listening_motion();
+                    if (err != ESP_OK) {
+                        ESP_LOGW(TAG, "K1: listening servo motion rejected (%s)",
+                                 esp_err_to_name(err));
+                    }
                     ESP_LOGI(TAG, "K1: recording started");
                 }
             } else {
                 audio_mic_set_recording(false);
+                servo_stop_listening_motion();
                 display_set_status("Recorded", "Press K7");
                 ESP_LOGI(TAG, "K1: recording stopped");
             }

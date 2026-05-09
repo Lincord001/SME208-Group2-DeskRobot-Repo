@@ -190,7 +190,7 @@ static void voice_assistant_full_test_task(void *arg)
     int16_t *pcm_copy = NULL;
     char transcript[512];
     char reply[1024];
-    bool servo_orbit_started = false;
+    bool servo_thinking_started = false;
     esp_err_t err = ESP_OK;
 
     if (!wifi_network_is_connected()) {
@@ -232,11 +232,11 @@ static void voice_assistant_full_test_task(void *arg)
 
     memcpy(pcm_copy, audio_buffer->buffer, recorded_size);
 
-    err = servo_start_orbit_motion();
+    err = servo_start_thinking_motion();
     if (err == ESP_OK) {
-        servo_orbit_started = true;
+        servo_thinking_started = true;
     } else {
-        ESP_LOGW(TAG, "Failed to start servo orbit motion: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "Failed to start servo thinking motion: %s", esp_err_to_name(err));
     }
 
     ESP_LOGI(TAG, "Full voice test: ASR samples=%u sample_rate=%lu",
@@ -290,8 +290,8 @@ static void voice_assistant_full_test_task(void *arg)
     display_set_status("Voice ready", "Press K2");
 
 done:
-    if (servo_orbit_started) {
-        servo_stop_orbit_motion();
+    if (servo_thinking_started) {
+        servo_stop_thinking_motion();
     }
     free(pcm_copy);
     s_full_task = NULL;

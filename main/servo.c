@@ -20,6 +20,7 @@
 #define SERVO_MIN_ANGLE_DEG      0
 #define SERVO_CENTER_ANGLE_DEG   90
 #define SERVO_MAX_ANGLE_DEG      180
+#define SERVO_LOOK_DOWN_ANGLE_DEG 80
 
 #define SERVO_MIN_PULSE_US       500
 #define SERVO_CENTER_PULSE_US    1500
@@ -32,13 +33,13 @@
 #define SERVO_CMD_QUEUE_LEN      8
 #define SERVO_TASK_STACK         4096
 #define SERVO_TASK_PRIO          4
-#define SERVO_ORBIT_TASK_STACK   3072
-#define SERVO_ORBIT_TASK_PRIO    3
+#define SERVO_MOTION_TASK_STACK  3072
+#define SERVO_MOTION_TASK_PRIO   3
 #define SERVO_ORBIT_STEP_MS      120
 #define SERVO_ORBIT_RADIUS_DEG   6
-#define SERVO_PLAYBACK_TASK_STACK 3072
-#define SERVO_PLAYBACK_TASK_PRIO  3
 #define SERVO_PLAYBACK_STEP_MS    160
+#define SERVO_LISTENING_STEP_MS   260
+#define SERVO_THINKING_STEP_MS    140
 
 #define SERVO_HORIZONTAL_GPIO    GPIO_NUM_16
 #define SERVO_VERTICAL_GPIO      GPIO_NUM_17
@@ -50,6 +51,14 @@ typedef enum {
     SERVO_CMD_RELATIVE = 0,
     SERVO_CMD_ABSOLUTE,
 } servo_command_type_t;
+
+typedef enum {
+    SERVO_MOTION_NONE = 0,
+    SERVO_MOTION_LISTENING,
+    SERVO_MOTION_THINKING,
+    SERVO_MOTION_ORBIT,
+    SERVO_MOTION_PLAYBACK,
+} servo_motion_mode_t;
 
 typedef struct {
     servo_command_type_t type;
@@ -95,11 +104,10 @@ static servo_axis_state_t s_axes[SERVO_AXIS_COUNT] = {
 
 static QueueHandle_t s_command_queue;
 static TaskHandle_t s_task_handle;
-static TaskHandle_t s_orbit_task_handle;
-static TaskHandle_t s_playback_task_handle;
+static TaskHandle_t s_motion_task_handle;
 static bool s_initialized;
-static volatile bool s_orbit_running;
-static volatile bool s_playback_running;
+static volatile bool s_motion_running;
+static volatile servo_motion_mode_t s_motion_mode = SERVO_MOTION_NONE;
 
 static const servo_motion_point_t s_orbit_points[] = {
     {+SERVO_ORBIT_RADIUS_DEG, 0},
@@ -125,6 +133,26 @@ static const servo_motion_point_t s_playback_points[] = {
     {+4, -3},
     {-2, -2},
     {-7, +1},
+};
+
+static const servo_motion_point_t s_listening_points[] = {
+    {-12, +2},
+    {-7, +1},
+    {0, 0},
+    {+7, +1},
+    {+12, +2},
+    {+7, +1},
+    {0, 0},
+    {-7, +1},
+};
+
+static const servo_motion_point_t s_thinking_points[] = {
+    {-4, -2},
+    {-2, +3},
+    {+3, +4},
+    {+5, 0},
+    {+2, -4},
+    {-3, -3},
 };
 
 static uint32_t servo_angle_to_duty(int angle_deg)
@@ -402,118 +430,176 @@ static esp_err_t servo_queue_absolute(servo_axis_t axis, int angle_deg)
     return ESP_OK;
 }
 
-static void servo_orbit_task(void *arg)
+static const char *servo_motion_mode_name(servo_motion_mode_t mode)
 {
-    (void)arg;
+    switch (mode) {
+    case SERVO_MOTION_LISTENING:
+        return "listening";
+    case SERVO_MOTION_THINKING:
+        return "thinking";
+    case SERVO_MOTION_ORBIT:
+        return "orbit";
+    case SERVO_MOTION_PLAYBACK:
+        return "playback";
+    case SERVO_MOTION_NONE:
+    default:
+        return "none";
+    }
+}
+
+static const servo_motion_point_t *servo_motion_points(servo_motion_mode_t mode,
+                                                       size_t *out_count,
+                                                       uint32_t *out_step_ms)
+{
+    switch (mode) {
+    case SERVO_MOTION_LISTENING:
+        *out_count = sizeof(s_listening_points) / sizeof(s_listening_points[0]);
+        *out_step_ms = SERVO_LISTENING_STEP_MS;
+        return s_listening_points;
+
+    case SERVO_MOTION_THINKING:
+        *out_count = sizeof(s_thinking_points) / sizeof(s_thinking_points[0]);
+        *out_step_ms = SERVO_THINKING_STEP_MS;
+        return s_thinking_points;
+
+    case SERVO_MOTION_PLAYBACK:
+        *out_count = sizeof(s_playback_points) / sizeof(s_playback_points[0]);
+        *out_step_ms = SERVO_PLAYBACK_STEP_MS;
+        return s_playback_points;
+
+    case SERVO_MOTION_ORBIT:
+    default:
+        *out_count = sizeof(s_orbit_points) / sizeof(s_orbit_points[0]);
+        *out_step_ms = SERVO_ORBIT_STEP_MS;
+        return s_orbit_points;
+    }
+}
+
+static void servo_motion_task(void *arg)
+{
+    servo_motion_mode_t mode = (servo_motion_mode_t)(intptr_t)arg;
     size_t idx = 0;
+    size_t point_count = 0;
+    uint32_t step_ms = 0;
+    const servo_motion_point_t *points = servo_motion_points(mode, &point_count, &step_ms);
 
-    ESP_LOGI(TAG, "Orbit motion started");
+    ESP_LOGI(TAG, "%s motion started", servo_motion_mode_name(mode));
 
-    while (s_orbit_running) {
-        const servo_motion_point_t *point = &s_orbit_points[idx];
+    while (s_motion_running && s_motion_mode == mode) {
+        const servo_motion_point_t *point = &points[idx];
         (void)servo_queue_absolute(SERVO_AXIS_HORIZONTAL,
                                    SERVO_CENTER_ANGLE_DEG + point->horizontal);
         (void)servo_queue_absolute(SERVO_AXIS_VERTICAL,
                                    SERVO_CENTER_ANGLE_DEG + point->vertical);
 
-        idx = (idx + 1) % (sizeof(s_orbit_points) / sizeof(s_orbit_points[0]));
-        vTaskDelay(pdMS_TO_TICKS(SERVO_ORBIT_STEP_MS));
+        idx = (idx + 1) % point_count;
+        vTaskDelay(pdMS_TO_TICKS(step_ms));
     }
 
     (void)servo_queue_absolute(SERVO_AXIS_HORIZONTAL, SERVO_CENTER_ANGLE_DEG);
     (void)servo_queue_absolute(SERVO_AXIS_VERTICAL, SERVO_CENTER_ANGLE_DEG);
 
-    ESP_LOGI(TAG, "Orbit motion stopped");
-    s_orbit_task_handle = NULL;
+    ESP_LOGI(TAG, "%s motion stopped", servo_motion_mode_name(mode));
+    s_motion_mode = SERVO_MOTION_NONE;
+    s_motion_task_handle = NULL;
     vTaskDelete(NULL);
+}
+
+static esp_err_t servo_start_motion(servo_motion_mode_t mode)
+{
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (mode == SERVO_MOTION_NONE) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_motion_task_handle != NULL) {
+        if (s_motion_mode == mode) {
+            return ESP_OK;
+        }
+        s_motion_running = false;
+        for (int i = 0; i < 10 && s_motion_task_handle != NULL; ++i) {
+            vTaskDelay(pdMS_TO_TICKS(30));
+        }
+        if (s_motion_task_handle != NULL) {
+            return ESP_ERR_INVALID_STATE;
+        }
+    }
+
+    s_motion_mode = mode;
+    s_motion_running = true;
+    if (xTaskCreate(servo_motion_task,
+                    "servo_motion",
+                    SERVO_MOTION_TASK_STACK,
+                    (void *)(intptr_t)mode,
+                    SERVO_MOTION_TASK_PRIO,
+                    &s_motion_task_handle) != pdPASS) {
+        s_motion_task_handle = NULL;
+        s_motion_mode = SERVO_MOTION_NONE;
+        s_motion_running = false;
+        return ESP_ERR_NO_MEM;
+    }
+
+    return ESP_OK;
+}
+
+static void servo_stop_motion(servo_motion_mode_t mode)
+{
+    if (mode == SERVO_MOTION_NONE || s_motion_mode == mode) {
+        s_motion_running = false;
+    }
 }
 
 esp_err_t servo_start_orbit_motion(void)
 {
-    if (!s_initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (s_playback_task_handle != NULL) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (s_orbit_task_handle != NULL) {
-        return ESP_OK;
-    }
-
-    s_orbit_running = true;
-    if (xTaskCreate(servo_orbit_task,
-                    "servo_orbit",
-                    SERVO_ORBIT_TASK_STACK,
-                    NULL,
-                    SERVO_ORBIT_TASK_PRIO,
-                    &s_orbit_task_handle) != pdPASS) {
-        s_orbit_task_handle = NULL;
-        s_orbit_running = false;
-        return ESP_ERR_NO_MEM;
-    }
-
-    return ESP_OK;
+    return servo_start_motion(SERVO_MOTION_ORBIT);
 }
 
 void servo_stop_orbit_motion(void)
 {
-    s_orbit_running = false;
+    servo_stop_motion(SERVO_MOTION_ORBIT);
 }
 
-static void servo_playback_task(void *arg)
+esp_err_t servo_start_listening_motion(void)
 {
-    (void)arg;
-    size_t idx = 0;
+    return servo_start_motion(SERVO_MOTION_LISTENING);
+}
 
-    ESP_LOGI(TAG, "Playback motion started");
+void servo_stop_listening_motion(void)
+{
+    servo_stop_motion(SERVO_MOTION_LISTENING);
+}
 
-    while (s_playback_running) {
-        const servo_motion_point_t *point = &s_playback_points[idx];
-        (void)servo_queue_absolute(SERVO_AXIS_HORIZONTAL,
-                                   SERVO_CENTER_ANGLE_DEG + point->horizontal);
-        (void)servo_queue_absolute(SERVO_AXIS_VERTICAL,
-                                   SERVO_CENTER_ANGLE_DEG + point->vertical);
+esp_err_t servo_start_thinking_motion(void)
+{
+    return servo_start_motion(SERVO_MOTION_THINKING);
+}
 
-        idx = (idx + 1) % (sizeof(s_playback_points) / sizeof(s_playback_points[0]));
-        vTaskDelay(pdMS_TO_TICKS(SERVO_PLAYBACK_STEP_MS));
-    }
-
-    (void)servo_queue_absolute(SERVO_AXIS_HORIZONTAL, SERVO_CENTER_ANGLE_DEG);
-    (void)servo_queue_absolute(SERVO_AXIS_VERTICAL, SERVO_CENTER_ANGLE_DEG);
-
-    ESP_LOGI(TAG, "Playback motion stopped");
-    s_playback_task_handle = NULL;
-    vTaskDelete(NULL);
+void servo_stop_thinking_motion(void)
+{
+    servo_stop_motion(SERVO_MOTION_THINKING);
 }
 
 esp_err_t servo_start_playback_motion(void)
 {
-    if (!s_initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (s_orbit_task_handle != NULL) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (s_playback_task_handle != NULL) {
-        return ESP_OK;
-    }
-
-    s_playback_running = true;
-    if (xTaskCreate(servo_playback_task,
-                    "servo_playback",
-                    SERVO_PLAYBACK_TASK_STACK,
-                    NULL,
-                    SERVO_PLAYBACK_TASK_PRIO,
-                    &s_playback_task_handle) != pdPASS) {
-        s_playback_task_handle = NULL;
-        s_playback_running = false;
-        return ESP_ERR_NO_MEM;
-    }
-
-    return ESP_OK;
+    return servo_start_motion(SERVO_MOTION_PLAYBACK);
 }
 
 void servo_stop_playback_motion(void)
 {
-    s_playback_running = false;
+    servo_stop_motion(SERVO_MOTION_PLAYBACK);
+}
+
+void servo_center(void)
+{
+    servo_stop_motion(SERVO_MOTION_NONE);
+    (void)servo_queue_absolute(SERVO_AXIS_HORIZONTAL, SERVO_CENTER_ANGLE_DEG);
+    (void)servo_queue_absolute(SERVO_AXIS_VERTICAL, SERVO_CENTER_ANGLE_DEG);
+}
+
+void servo_look_down(void)
+{
+    servo_stop_motion(SERVO_MOTION_NONE);
+    (void)servo_queue_absolute(SERVO_AXIS_HORIZONTAL, SERVO_CENTER_ANGLE_DEG);
+    (void)servo_queue_absolute(SERVO_AXIS_VERTICAL, SERVO_LOOK_DOWN_ANGLE_DEG);
 }
