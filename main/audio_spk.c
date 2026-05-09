@@ -9,6 +9,7 @@
 
 #include "audio_spk.h"
 #include "audio_mic.h"
+#include "servo.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -122,26 +123,34 @@ static void spk_task(void *arg)
     static int16_t tx_buf[SPK_DMA_FRAMES];
 
     while (1) {
-        if (!s_audio_buf->playing) {
+        audio_buffer_state_t state;
+        audio_buffer_get_state(s_audio_buf, &state);
+        if (!state.playing) {
             /* 未在播放状态，让出 CPU 等待 */
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
 
         /* 检查是否有可播放的录音数据 */
-        if (!s_audio_buf->recording_complete || s_audio_buf->recorded_size == 0) {
+        if (!state.recording_complete || state.recorded_size == 0) {
             ESP_LOGW(TAG, "No recorded data to play");
+            audio_buffer_lock(s_audio_buf);
             s_audio_buf->playing = false;
+            audio_buffer_unlock(s_audio_buf);
             continue;
         }
 
         /* 重置读指针，开始播放 */
+        audio_buffer_lock(s_audio_buf);
         s_audio_buf->current_read_pos = 0;
         size_t total_samples = s_audio_buf->recorded_size / sizeof(int16_t);
+        audio_buffer_unlock(s_audio_buf);
 
         if (audio_spk_enable_tx_if_needed() != ESP_OK) {
             ESP_LOGW(TAG, "Failed to enable TX channel");
+            audio_buffer_lock(s_audio_buf);
             s_audio_buf->playing = false;
+            audio_buffer_unlock(s_audio_buf);
             continue;
         }
 
@@ -149,13 +158,29 @@ static void spk_task(void *arg)
            先冒出一小段末尾音频。 */
         audio_spk_prime_tx_with_silence();
 
+        bool playback_motion_started = false;
+        esp_err_t motion_err = servo_start_playback_motion();
+        if (motion_err == ESP_OK) {
+            playback_motion_started = true;
+        } else {
+            ESP_LOGW(TAG, "Failed to start playback servo motion: %s",
+                     esp_err_to_name(motion_err));
+        }
+
         ESP_LOGI(TAG, "Playback started, %u samples", (unsigned)total_samples);
 
-        while (s_audio_buf->playing) {
-            size_t read_pos = s_audio_buf->current_read_pos;
+        while (1) {
+            audio_buffer_get_state(s_audio_buf, &state);
+            if (!state.playing) {
+                break;
+            }
+
+            size_t read_pos = state.current_read_pos;
             if (read_pos >= total_samples) {
                 /* 播完一遍，停止 */
+                audio_buffer_lock(s_audio_buf);
                 s_audio_buf->playing = false;
+                audio_buffer_unlock(s_audio_buf);
                 ESP_LOGI(TAG, "Playback finished");
                 break;
             }
@@ -181,13 +206,20 @@ static void spk_task(void *arg)
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "i2s_channel_write failed: %s",
                          esp_err_to_name(err));
+                audio_buffer_lock(s_audio_buf);
                 s_audio_buf->playing = false;
+                audio_buffer_unlock(s_audio_buf);
                 break;
             }
 
+            audio_buffer_lock(s_audio_buf);
             s_audio_buf->current_read_pos += chunk;
+            audio_buffer_unlock(s_audio_buf);
         }
 
+        if (playback_motion_started) {
+            servo_stop_playback_motion();
+        }
         audio_spk_flush_and_disable_tx();
     }
 }
@@ -258,19 +290,33 @@ esp_err_t audio_spk_set_playing(bool enable)
     }
 
     if (enable) {
+        bool no_recording_available = false;
+        bool still_recording = false;
+
+        audio_buffer_lock(s_audio_buf);
         if (!s_audio_buf->recording_complete || s_audio_buf->recorded_size == 0) {
+            no_recording_available = true;
+        } else if (s_audio_buf->recording) {
+            still_recording = true;
+        } else {
+            s_audio_buf->current_read_pos = 0;
+            s_audio_buf->playing          = true;
+        }
+        audio_buffer_unlock(s_audio_buf);
+
+        if (no_recording_available) {
             ESP_LOGW(TAG, "No recording available to play");
             return ESP_ERR_INVALID_STATE;
         }
-        if (s_audio_buf->recording) {
+        if (still_recording) {
             ESP_LOGW(TAG, "Still recording, cannot play");
             return ESP_ERR_INVALID_STATE;
         }
-        s_audio_buf->current_read_pos = 0;
-        s_audio_buf->playing          = true;
         ESP_LOGI(TAG, "Playback start requested");
     } else {
+        audio_buffer_lock(s_audio_buf);
         s_audio_buf->playing = false;
+        audio_buffer_unlock(s_audio_buf);
         ESP_LOGI(TAG, "Playback stop requested");
     }
 

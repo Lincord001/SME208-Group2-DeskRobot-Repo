@@ -60,10 +60,13 @@ static void main_key_task(void *arg)
         }
 
         /* ── 音频控制逻辑（不阻塞，仅设置标志位）─────── */
+        audio_buffer_state_t audio_state;
+        audio_buffer_get_state(&s_audio_buf, &audio_state);
+
         switch (msg.key_id) {
         case 1: /* K1：录音 开/停 */
-            if (!s_audio_buf.recording) {
-                if (s_audio_buf.playing) {
+            if (!audio_state.recording) {
+                if (audio_state.playing) {
                     ESP_LOGW(TAG, "K1: stop playback first");
                 } else {
                     audio_mic_set_recording(true);
@@ -78,13 +81,14 @@ static void main_key_task(void *arg)
             break;
 
         case 2: /* K2：播放 开/停 */
-            if (!s_audio_buf.playing) {
-                if (s_audio_buf.recording) {
+            if (!audio_state.playing) {
+                if (audio_state.recording) {
                     ESP_LOGW(TAG, "K2: stop recording first");
                 } else {
                     esp_err_t play_err = audio_spk_set_playing(true);
                     if (play_err == ESP_OK) {
-                        uint32_t total_sec = (uint32_t)((s_audio_buf.recorded_size / sizeof(int16_t)) /
+                        audio_buffer_get_state(&s_audio_buf, &audio_state);
+                        uint32_t total_sec = (uint32_t)((audio_state.recorded_size / sizeof(int16_t)) /
                                                         AUDIO_SAMPLE_RATE);
                         display_set_answering(0, total_sec);
                         ESP_LOGI(TAG, "K2: playback started");
@@ -116,8 +120,8 @@ static void main_key_task(void *arg)
             break;
 
         case 7: /* K7: full ASR->LLM->TTS test, or TTS smoke test if no audio */
-            if (s_audio_buf.recording_complete && s_audio_buf.recorded_size > 0 &&
-                !s_audio_buf.recording && !s_audio_buf.playing) {
+            if (audio_state.recording_complete && audio_state.recorded_size > 0 &&
+                !audio_state.recording && !audio_state.playing) {
                 err = voice_assistant_start_full_test(&s_audio_buf, AUDIO_SAMPLE_RATE);
             } else {
                 err = voice_assistant_start_tts_test(&s_audio_buf);
@@ -183,13 +187,7 @@ void app_main(void)
                  (unsigned)AUDIO_BUF_BYTES);
         return;
     }
-    s_audio_buf.total_size          = AUDIO_BUF_BYTES;
-    s_audio_buf.current_write_pos   = 0;
-    s_audio_buf.current_read_pos    = 0;
-    s_audio_buf.recorded_size       = 0;
-    s_audio_buf.recording           = false;
-    s_audio_buf.playing             = false;
-    s_audio_buf.recording_complete  = false;
+    audio_buffer_init(&s_audio_buf, s_audio_buf.buffer, AUDIO_BUF_BYTES);
     ESP_LOGI(TAG, "PSRAM buffer allocated: %u bytes", (unsigned)AUDIO_BUF_BYTES);
 
     /* OLED display is non-critical: log failures and keep audio/key features running. */

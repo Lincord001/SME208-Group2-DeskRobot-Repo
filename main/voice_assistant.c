@@ -12,6 +12,7 @@
 #include "asr_client.h"
 #include "display.h"
 #include "llm_client.h"
+#include "servo.h"
 #include "tts_client.h"
 #include "wifi_network.h"
 
@@ -89,12 +90,17 @@ static void voice_assistant_asr_test_task(void *arg)
         return;
     }
 
+    audio_buffer_state_t audio_state = {0};
+    if (audio_buffer != NULL) {
+        audio_buffer_get_state(audio_buffer, &audio_state);
+    }
+
     if (audio_buffer == NULL ||
         audio_buffer->buffer == NULL ||
-        !audio_buffer->recording_complete ||
-        audio_buffer->recorded_size == 0 ||
-        audio_buffer->recording ||
-        audio_buffer->playing) {
+        !audio_state.recording_complete ||
+        audio_state.recorded_size == 0 ||
+        audio_state.recording ||
+        audio_state.playing) {
         ESP_LOGW(TAG, "No stable recorded audio for ASR test");
         display_set_error();
         s_asr_task = NULL;
@@ -102,7 +108,7 @@ static void voice_assistant_asr_test_task(void *arg)
         return;
     }
 
-    size_t sample_count = audio_buffer->recorded_size / sizeof(int16_t);
+    size_t sample_count = audio_state.recorded_size / sizeof(int16_t);
     ESP_LOGI(TAG, "ASR test: samples=%u sample_rate=%lu",
              (unsigned)sample_count,
              (unsigned long)sample_rate_hz);
@@ -173,6 +179,8 @@ static void voice_assistant_full_test_task(void *arg)
     int16_t *pcm_copy = NULL;
     char transcript[512];
     char reply[1024];
+    bool servo_orbit_started = false;
+    esp_err_t err = ESP_OK;
 
     if (!wifi_network_is_connected()) {
         ESP_LOGW(TAG, "WiFi is not connected; skip full voice test");
@@ -180,18 +188,23 @@ static void voice_assistant_full_test_task(void *arg)
         goto done;
     }
 
+    audio_buffer_state_t audio_state = {0};
+    if (audio_buffer != NULL) {
+        audio_buffer_get_state(audio_buffer, &audio_state);
+    }
+
     if (audio_buffer == NULL ||
         audio_buffer->buffer == NULL ||
-        !audio_buffer->recording_complete ||
-        audio_buffer->recorded_size == 0 ||
-        audio_buffer->recording ||
-        audio_buffer->playing) {
+        !audio_state.recording_complete ||
+        audio_state.recorded_size == 0 ||
+        audio_state.recording ||
+        audio_state.playing) {
         ESP_LOGW(TAG, "No stable recorded audio for full voice test");
         display_set_error();
         goto done;
     }
 
-    size_t recorded_size = audio_buffer->recorded_size;
+    size_t recorded_size = audio_state.recorded_size;
     size_t sample_count = recorded_size / sizeof(int16_t);
     pcm_copy = (int16_t *)heap_caps_malloc(recorded_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (pcm_copy == NULL) {
@@ -205,17 +218,24 @@ static void voice_assistant_full_test_task(void *arg)
 
     memcpy(pcm_copy, audio_buffer->buffer, recorded_size);
 
+    err = servo_start_orbit_motion();
+    if (err == ESP_OK) {
+        servo_orbit_started = true;
+    } else {
+        ESP_LOGW(TAG, "Failed to start servo orbit motion: %s", esp_err_to_name(err));
+    }
+
     ESP_LOGI(TAG, "Full voice test: ASR samples=%u sample_rate=%lu",
              (unsigned)sample_count,
              (unsigned long)sample_rate_hz);
     display_set_idle();
     display_set_status("Recognizing", "ASR");
 
-    esp_err_t err = asr_client_recognize_pcm16(pcm_copy,
-                                               sample_count,
-                                               sample_rate_hz,
-                                               transcript,
-                                               sizeof(transcript));
+    err = asr_client_recognize_pcm16(pcm_copy,
+                                     sample_count,
+                                     sample_rate_hz,
+                                     transcript,
+                                     sizeof(transcript));
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Full voice ASR failed: %s", esp_err_to_name(err));
         display_set_error();
@@ -250,6 +270,9 @@ static void voice_assistant_full_test_task(void *arg)
     display_set_status("Voice ready", "Press K2");
 
 done:
+    if (servo_orbit_started) {
+        servo_stop_orbit_motion();
+    }
     free(pcm_copy);
     s_full_task = NULL;
     vTaskDelete(NULL);

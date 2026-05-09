@@ -158,16 +158,23 @@ static void tts_write_audio_to_buffer(tts_session_t *session,
     }
 
     audio_buffer_t *audio_buffer = session->audio_buffer;
-    size_t write_byte_pos = audio_buffer->current_write_pos * sizeof(int16_t);
-    if (write_byte_pos + len > audio_buffer->total_size) {
-        len = audio_buffer->total_size - write_byte_pos;
+    audio_buffer_state_t audio_state;
+    audio_buffer_get_state(audio_buffer, &audio_state);
+    size_t write_byte_pos = audio_state.current_write_pos * sizeof(int16_t);
+    if (write_byte_pos >= audio_state.total_size) {
+        len = 0;
+        session->buffer_overflow = true;
+    } else if (write_byte_pos + len > audio_state.total_size) {
+        len = audio_state.total_size - write_byte_pos;
         session->buffer_overflow = true;
     }
 
     if (len > 0) {
         memcpy((uint8_t *)audio_buffer->buffer + write_byte_pos, data, len);
+        audio_buffer_lock(audio_buffer);
         audio_buffer->current_write_pos += len / sizeof(int16_t);
         audio_buffer->recorded_size = audio_buffer->current_write_pos * sizeof(int16_t);
+        audio_buffer_unlock(audio_buffer);
     }
 }
 
@@ -363,17 +370,21 @@ esp_err_t tts_client_synthesize_to_audio_buffer(const char *text,
     *out_audio_bytes = 0;
 
     if (audio_buffer != NULL) {
-        if (audio_buffer->buffer == NULL || audio_buffer->total_size == 0 ||
-            audio_buffer->recording || audio_buffer->playing) {
+        audio_buffer_state_t audio_state;
+        audio_buffer_get_state(audio_buffer, &audio_state);
+        if (audio_buffer->buffer == NULL || audio_state.total_size == 0 ||
+            audio_state.recording || audio_state.playing) {
             return ESP_ERR_INVALID_STATE;
         }
 
+        audio_buffer_lock(audio_buffer);
         audio_buffer->current_write_pos = 0;
         audio_buffer->current_read_pos = 0;
         audio_buffer->recorded_size = 0;
         audio_buffer->recording = false;
         audio_buffer->playing = false;
         audio_buffer->recording_complete = false;
+        audio_buffer_unlock(audio_buffer);
     }
 
     if (!api_config_has_dashscope_api_key()) {
@@ -475,8 +486,12 @@ esp_err_t tts_client_synthesize_to_audio_buffer(const char *text,
         ESP_LOGW(TAG, "TTS finished without audio");
         err = ESP_ERR_INVALID_RESPONSE;
     } else if (session.buffer_overflow) {
+        audio_buffer_state_t audio_state = {0};
+        if (audio_buffer != NULL) {
+            audio_buffer_get_state(audio_buffer, &audio_state);
+        }
         ESP_LOGW(TAG, "TTS audio buffer overflow, stored %u of received %u bytes",
-                 (unsigned)(audio_buffer != NULL ? audio_buffer->recorded_size : 0),
+                 (unsigned)(audio_buffer != NULL ? audio_state.recorded_size : 0),
                  (unsigned)session.audio_bytes);
         err = ESP_ERR_NO_MEM;
     } else {
@@ -486,10 +501,13 @@ esp_err_t tts_client_synthesize_to_audio_buffer(const char *text,
     }
 
     if (audio_buffer != NULL && session.audio_bytes > 0) {
+        audio_buffer_lock(audio_buffer);
         audio_buffer->recording_complete = true;
         audio_buffer->current_read_pos = 0;
+        size_t recorded_size = audio_buffer->recorded_size;
+        audio_buffer_unlock(audio_buffer);
         ESP_LOGI(TAG, "TTS PCM stored to audio buffer: %u bytes",
-                 (unsigned)audio_buffer->recorded_size);
+                 (unsigned)recorded_size);
     }
 
 cleanup:

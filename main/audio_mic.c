@@ -69,23 +69,34 @@ static void mic_task(void *arg)
         }
 
         /* 录音停止后，先封存当前已采样的数据，再进入空闲循环。 */
+        bool finalized_recording = false;
+        size_t finalized_size = 0;
+        audio_buffer_lock(s_audio_buf);
         if (!s_audio_buf->recording &&
             s_audio_buf->current_write_pos > 0 &&
-            !s_audio_buf->recording_complete)
-        {
+            !s_audio_buf->recording_complete) {
             s_audio_buf->recorded_size =
                 s_audio_buf->current_write_pos * sizeof(int16_t);
             s_audio_buf->recording_complete = true;
+            finalized_recording = true;
+            finalized_size = s_audio_buf->recorded_size;
+        }
+        bool recording = s_audio_buf->recording;
+        size_t write_pos = s_audio_buf->current_write_pos;
+        size_t total_size = s_audio_buf->total_size;
+        audio_buffer_unlock(s_audio_buf);
+        if (finalized_recording) {
             ESP_LOGI(TAG, "Recording stopped, %u bytes saved",
-                     (unsigned)s_audio_buf->recorded_size);
+                     (unsigned)finalized_size);
         }
 
         /* 仅在录音状态下写入 PSRAM */
-        if (!s_audio_buf->recording) {
+        if (!recording) {
             continue;
         }
 
         size_t frames = bytes_read / sizeof(int32_t);
+        bool buffer_full = false;
         for (size_t i = 0; i < frames; i++) {
             /* INMP441 Philips 模式：24-bit 数据占 32-bit slot 的高 24 位
                右移 8 位取 24-bit 有符号值，再截断为 16-bit PCM              */
@@ -99,21 +110,32 @@ static void mic_task(void *arg)
             level_sum += (uint32_t)abs_sample;
             level_samples++;
 
-            size_t write_pos = s_audio_buf->current_write_pos;
             size_t byte_pos  = write_pos * sizeof(int16_t);
 
-            if (byte_pos + sizeof(int16_t) > s_audio_buf->total_size) {
-                /* 缓冲区已满，自动停止录音 */
-                s_audio_buf->recording          = false;
-                s_audio_buf->recording_complete = true;
-                s_audio_buf->recorded_size      = byte_pos;
-                ESP_LOGI(TAG, "Buffer full, recording stopped (%u bytes)",
-                         (unsigned)byte_pos);
+            if (byte_pos + sizeof(int16_t) > total_size) {
+                buffer_full = true;
                 break;
             }
 
             s_audio_buf->buffer[write_pos] = s16;
-            s_audio_buf->current_write_pos++;
+            write_pos++;
+        }
+
+        size_t full_size = 0;
+        audio_buffer_lock(s_audio_buf);
+        s_audio_buf->current_write_pos = write_pos;
+        if (buffer_full) {
+            size_t byte_pos = write_pos * sizeof(int16_t);
+            /* 缓冲区已满，自动停止录音 */
+            s_audio_buf->recording          = false;
+            s_audio_buf->recording_complete = true;
+            s_audio_buf->recorded_size      = byte_pos;
+            full_size = byte_pos;
+        }
+        audio_buffer_unlock(s_audio_buf);
+        if (buffer_full) {
+            ESP_LOGI(TAG, "Buffer full, recording stopped (%u bytes)",
+                     (unsigned)full_size);
         }
 
         TickType_t now_tick = xTaskGetTickCount();
@@ -202,15 +224,19 @@ void audio_mic_set_recording(bool enable)
     if (!s_initialized || s_audio_buf == NULL) return;
 
     if (enable) {
+        audio_buffer_lock(s_audio_buf);
         /* 重置缓冲区写指针，开始新录音 */
         s_audio_buf->current_write_pos  = 0;
         s_audio_buf->current_read_pos   = 0;
         s_audio_buf->recorded_size      = 0;
         s_audio_buf->recording_complete = false;
         s_audio_buf->recording          = true;
+        audio_buffer_unlock(s_audio_buf);
         ESP_LOGI(TAG, "Recording started");
     } else {
+        audio_buffer_lock(s_audio_buf);
         s_audio_buf->recording = false;
+        audio_buffer_unlock(s_audio_buf);
         /* recorded_size 和 recording_complete 由任务内收尾设置 */
         ESP_LOGI(TAG, "Recording stop requested");
     }

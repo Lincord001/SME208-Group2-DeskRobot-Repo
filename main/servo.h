@@ -12,5 +12,9 @@ typedef enum {
 
 esp_err_t servo_init(void);
 esp_err_t servo_move_relative(servo_axis_t axis, int delta_deg);
+esp_err_t servo_start_orbit_motion(void);
+void servo_stop_orbit_motion(void);
+esp_err_t servo_start_playback_motion(void);
+void servo_stop_playback_motion(void);
 
 #endif // SERVO_H

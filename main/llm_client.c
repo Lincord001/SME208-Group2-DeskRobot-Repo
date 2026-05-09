@@ -12,6 +12,12 @@
 #include "api_config.h"
 
 #define LLM_RESPONSE_BUFFER_BYTES (16 * 1024)
+#define LLM_MAX_COMPLETION_TOKENS 100
+#define LLM_REPLY_MAX_UTF8_CHARS  70
+
+static const char *LLM_SYSTEM_PROMPT =
+    "你是桌面机器人语音助手。请用中文直接回答，控制在70个汉字以内，"
+    "不要使用Markdown、列表或长段解释。";
 
 static const char *TAG = "llm_client";
 
@@ -50,17 +56,25 @@ static char *llm_build_request_body(const char *user_text)
 {
     cJSON *root = cJSON_CreateObject();
     cJSON *messages = cJSON_CreateArray();
+    cJSON *system_message = cJSON_CreateObject();
     cJSON *message = cJSON_CreateObject();
     cJSON *extra_body = cJSON_CreateObject();
-    if (root == NULL || messages == NULL || message == NULL || extra_body == NULL) {
+    if (root == NULL || messages == NULL || system_message == NULL ||
+        message == NULL || extra_body == NULL) {
         goto fail;
     }
 
     cJSON_AddStringToObject(root, "model", api_config_get_llm_model());
     cJSON_AddBoolToObject(root, "stream", false);
+    cJSON_AddNumberToObject(root, "max_tokens", LLM_MAX_COMPLETION_TOKENS);
     cJSON_AddBoolToObject(extra_body, "enable_thinking", false);
     cJSON_AddItemToObject(root, "extra_body", extra_body);
     extra_body = NULL;
+
+    cJSON_AddStringToObject(system_message, "role", "system");
+    cJSON_AddStringToObject(system_message, "content", LLM_SYSTEM_PROMPT);
+    cJSON_AddItemToArray(messages, system_message);
+    system_message = NULL;
 
     cJSON_AddStringToObject(message, "role", "user");
     cJSON_AddStringToObject(message, "content", user_text);
@@ -76,9 +90,63 @@ static char *llm_build_request_body(const char *user_text)
 fail:
     cJSON_Delete(root);
     cJSON_Delete(messages);
+    cJSON_Delete(system_message);
     cJSON_Delete(message);
     cJSON_Delete(extra_body);
     return NULL;
+}
+
+static size_t llm_limited_utf8_bytes(const char *text, size_t max_chars, size_t max_bytes)
+{
+    size_t bytes = 0;
+    size_t chars = 0;
+
+    while (text[bytes] != '\0' && chars < max_chars && bytes < max_bytes) {
+        unsigned char c = (unsigned char)text[bytes];
+        size_t char_bytes = 1;
+
+        if ((c & 0x80) == 0) {
+            char_bytes = 1;
+        } else if ((c & 0xE0) == 0xC0) {
+            char_bytes = 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            char_bytes = 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            char_bytes = 4;
+        }
+
+        if (bytes + char_bytes > max_bytes) {
+            break;
+        }
+
+        for (size_t i = 1; i < char_bytes; ++i) {
+            if ((text[bytes + i] & 0xC0) != 0x80) {
+                char_bytes = 1;
+                break;
+            }
+        }
+
+        bytes += char_bytes;
+        chars++;
+    }
+
+    return bytes;
+}
+
+static void llm_copy_limited_reply(char *out_reply,
+                                   size_t out_reply_len,
+                                   const char *content)
+{
+    if (out_reply_len == 0) {
+        return;
+    }
+
+    size_t max_bytes = out_reply_len - 1;
+    size_t copy_len = llm_limited_utf8_bytes(content,
+                                             LLM_REPLY_MAX_UTF8_CHARS,
+                                             max_bytes);
+    memcpy(out_reply, content, copy_len);
+    out_reply[copy_len] = '\0';
 }
 
 static esp_err_t llm_parse_reply(const char *response_json, char *out_reply, size_t out_reply_len)
@@ -106,7 +174,7 @@ static esp_err_t llm_parse_reply(const char *response_json, char *out_reply, siz
         return ESP_ERR_INVALID_RESPONSE;
     }
 
-    snprintf(out_reply, out_reply_len, "%s", content->valuestring);
+    llm_copy_limited_reply(out_reply, out_reply_len, content->valuestring);
     cJSON_Delete(root);
     return ESP_OK;
 }

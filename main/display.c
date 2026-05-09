@@ -36,6 +36,7 @@
 #define DISPLAY_TASK_PRIORITY    4
 #define DISPLAY_UPDATE_MS        250
 #define DISPLAY_ROTATE_180       1
+#define DISPLAY_WIFI_CONNECTED_HOLD_SEC 5
 
 #define SSD1306_CMD_SEG_REMAP_NORMAL   0xA0
 #define SSD1306_CMD_SEG_REMAP_REVERSE  0xA1
@@ -65,6 +66,12 @@ static esp_lcd_panel_handle_t s_panel;
 static lv_display_t *s_lvgl_disp;
 static lv_obj_t *s_title_label;
 static lv_obj_t *s_detail_label;
+static lv_obj_t *s_status_label;
+static lv_obj_t *s_meter_bg;
+static lv_obj_t *s_meter_fill;
+static lv_obj_t *s_eye;
+static lv_obj_t *s_eye_glint;
+static lv_obj_t *s_dots[3];
 static uint8_t s_i2c_hw_addr = DISPLAY_I2C_HW_ADDR;
 
 static const audio_buffer_t *s_audio_buf;
@@ -111,9 +118,11 @@ static uint32_t display_audio_total_sec(void)
         return 0;
     }
 
-    uint32_t total_samples = (uint32_t)(s_audio_buf->recorded_size / sizeof(int16_t));
+    audio_buffer_state_t audio_state;
+    audio_buffer_get_state(s_audio_buf, &audio_state);
+    uint32_t total_samples = (uint32_t)(audio_state.recorded_size / sizeof(int16_t));
     if (total_samples == 0) {
-        total_samples = (uint32_t)s_audio_buf->current_write_pos;
+        total_samples = (uint32_t)audio_state.current_write_pos;
     }
 
     return total_samples / s_audio_sample_rate_hz;
@@ -125,7 +134,9 @@ static uint32_t display_audio_read_sec(void)
         return 0;
     }
 
-    return (uint32_t)(s_audio_buf->current_read_pos / s_audio_sample_rate_hz);
+    audio_buffer_state_t audio_state;
+    audio_buffer_get_state(s_audio_buf, &audio_state);
+    return (uint32_t)(audio_state.current_read_pos / s_audio_sample_rate_hz);
 }
 
 static uint32_t display_audio_write_sec(void)
@@ -134,7 +145,9 @@ static uint32_t display_audio_write_sec(void)
         return 0;
     }
 
-    return (uint32_t)(s_audio_buf->current_write_pos / s_audio_sample_rate_hz);
+    audio_buffer_state_t audio_state;
+    audio_buffer_get_state(s_audio_buf, &audio_state);
+    return (uint32_t)(audio_state.current_write_pos / s_audio_sample_rate_hz);
 }
 
 static void display_format_text(const display_status_t *status,
@@ -148,8 +161,12 @@ static void display_format_text(const display_status_t *status,
 
     switch (status->state) {
     case DISPLAY_STATE_LISTENING:
-        if (s_audio_buf != NULL && s_audio_buf->recording) {
-            elapsed = display_audio_write_sec();
+        if (s_audio_buf != NULL) {
+            audio_buffer_state_t audio_state;
+            audio_buffer_get_state(s_audio_buf, &audio_state);
+            if (audio_state.recording) {
+                elapsed = display_audio_write_sec();
+            }
         }
         snprintf(title, title_size, "Listening");
         snprintf(detail, detail_size, "%lu sec", (unsigned long)elapsed);
@@ -175,7 +192,7 @@ static void display_format_text(const display_status_t *status,
         break;
 
     case DISPLAY_STATE_WIFI:
-        snprintf(title, title_size, "WiFi");
+        title[0] = '\0';
         snprintf(detail, detail_size, "%s",
                  status->wifi_status[0] != '\0' ? status->wifi_status : "init");
         break;
@@ -200,7 +217,69 @@ static void display_format_text(const display_status_t *status,
     }
 }
 
-static void display_render_text(const char *title, const char *detail)
+static void display_set_box_style(lv_obj_t *obj, bool filled, int radius)
+{
+    lv_obj_set_style_bg_color(obj, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(obj, filled ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_color(obj, lv_color_white(), 0);
+    lv_obj_set_style_border_width(obj, filled ? 0 : 1, 0);
+    lv_obj_set_style_radius(obj, radius, 0);
+    lv_obj_set_style_pad_all(obj, 0, 0);
+}
+
+static void display_set_visible(lv_obj_t *obj, bool visible)
+{
+    if (obj == NULL) {
+        return;
+    }
+    if (visible) {
+        lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void display_set_meter(uint8_t percent)
+{
+    if (percent > 100) {
+        percent = 100;
+    }
+
+    display_set_visible(s_meter_bg, true);
+    display_set_visible(s_meter_fill, true);
+    lv_obj_set_pos(s_meter_bg, 16, 42);
+    lv_obj_set_size(s_meter_bg, 96, 8);
+    lv_obj_set_pos(s_meter_fill, 18, 44);
+    lv_obj_set_size(s_meter_fill, (92 * percent) / 100, 4);
+}
+
+static void display_hide_motion_objects(void)
+{
+    display_set_visible(s_meter_bg, false);
+    display_set_visible(s_meter_fill, false);
+    display_set_visible(s_eye, false);
+    display_set_visible(s_eye_glint, false);
+    for (size_t i = 0; i < 3; ++i) {
+        display_set_visible(s_dots[i], false);
+    }
+}
+
+static uint8_t display_triangle_wave(uint32_t phase, uint32_t period, uint8_t max_value)
+{
+    uint32_t pos = phase % period;
+    uint32_t half = period / 2;
+    if (pos < half) {
+        return (uint8_t)((pos * max_value) / half);
+    }
+    return (uint8_t)(((period - pos) * max_value) / half);
+}
+
+static void display_render_status(const char *title,
+                                  const char *detail,
+                                  const display_status_t *status,
+                                  uint32_t elapsed,
+                                  uint32_t total,
+                                  uint32_t frame)
 {
     if (s_title_label == NULL || s_detail_label == NULL) {
         return;
@@ -209,8 +288,104 @@ static void display_render_text(const char *title, const char *detail)
     if (lvgl_port_lock(0)) {
         lv_label_set_text(s_title_label, title);
         lv_label_set_text(s_detail_label, detail);
-        lv_obj_align(s_title_label, LV_ALIGN_TOP_MID, 0, 8);
-        lv_obj_align(s_detail_label, LV_ALIGN_CENTER, 0, 8);
+        lv_obj_align(s_title_label, LV_ALIGN_TOP_MID, 0, 3);
+        lv_obj_align(s_detail_label, LV_ALIGN_BOTTOM_MID, 0, -3);
+        display_hide_motion_objects();
+
+        if (status->state == DISPLAY_STATE_IDLE) {
+            uint8_t eye_w = 26 + display_triangle_wave(frame, 12, 22);
+            int eye_x = 64 - (eye_w / 2);
+            int glint_x = eye_x + 6 + (int)display_triangle_wave(frame + 3, 10, 12);
+
+            lv_label_set_text(s_status_label, "");
+            display_set_visible(s_status_label, false);
+            display_set_visible(s_eye, true);
+            display_set_visible(s_eye_glint, true);
+            lv_obj_set_pos(s_eye, eye_x, 27);
+            lv_obj_set_size(s_eye, eye_w, 13);
+            lv_obj_set_pos(s_eye_glint, glint_x, 31);
+            lv_obj_set_size(s_eye_glint, 5, 5);
+        } else if (status->state == DISPLAY_STATE_LISTENING) {
+            uint8_t fill = (uint8_t)((elapsed * 100U) / 20U);
+            if (fill > 100) {
+                fill = 100;
+            }
+
+            lv_label_set_text(s_status_label, "REC");
+            display_set_visible(s_status_label, true);
+            lv_obj_align(s_status_label, LV_ALIGN_CENTER, 0, -14);
+            display_set_meter(fill);
+
+            for (size_t i = 0; i < 3; ++i) {
+                uint8_t height = 7 + display_triangle_wave(frame + (uint32_t)i * 2, 8, 15);
+                display_set_visible(s_dots[i], true);
+                lv_obj_set_pos(s_dots[i], 46 + (int)i * 16, 32 - (height / 2));
+                lv_obj_set_size(s_dots[i], 7, height);
+            }
+        } else if (status->state == DISPLAY_STATE_THINKING) {
+            lv_label_set_text(s_status_label, "AI");
+            display_set_visible(s_status_label, true);
+            lv_obj_align(s_status_label, LV_ALIGN_CENTER, 0, -15);
+
+            for (size_t i = 0; i < 3; ++i) {
+                bool active = ((frame / 2U) % 3U) == i;
+                display_set_visible(s_dots[i], true);
+                lv_obj_set_pos(s_dots[i], 48 + (int)i * 14, active ? 29 : 33);
+                lv_obj_set_size(s_dots[i], active ? 9 : 6, active ? 9 : 6);
+            }
+        } else if (status->state == DISPLAY_STATE_ANSWERING) {
+            uint8_t fill = 0;
+            if (total > 0) {
+                fill = (uint8_t)((elapsed * 100U) / total);
+                if (fill > 100) {
+                    fill = 100;
+                }
+            } else {
+                fill = display_triangle_wave(frame, 16, 100);
+            }
+            lv_label_set_text(s_status_label, "PLAY");
+            display_set_visible(s_status_label, true);
+            lv_obj_align(s_status_label, LV_ALIGN_CENTER, 0, -14);
+            display_set_meter(fill);
+        } else if (status->state == DISPLAY_STATE_WIFI) {
+            lv_label_set_text(s_status_label, "WIFI");
+            display_set_visible(s_status_label, true);
+            lv_obj_align(s_status_label, LV_ALIGN_CENTER, 0, -16);
+            for (size_t i = 0; i < 3; ++i) {
+                bool active = ((frame / 2U) % 4U) > i;
+                display_set_visible(s_dots[i], true);
+                lv_obj_set_pos(s_dots[i], 50 + (int)i * 12, 35 - (int)i * 4);
+                lv_obj_set_size(s_dots[i], active ? 8 : 5, active ? 8 : 5);
+            }
+        } else if (status->state == DISPLAY_STATE_STATUS) {
+            bool complete = strcmp(status->status_title, "Recorded") == 0 ||
+                            strcmp(status->status_title, "Recognized") == 0 ||
+                            strcmp(status->status_title, "Voice ready") == 0;
+            lv_label_set_text(s_status_label, complete ? "DONE" : "WORK");
+            display_set_visible(s_status_label, true);
+            lv_obj_align(s_status_label, LV_ALIGN_CENTER, 0, -14);
+            if (complete) {
+                display_set_meter(100);
+            } else {
+                for (size_t i = 0; i < 3; ++i) {
+                    bool active = ((frame / 2U) % 3U) == i;
+                    display_set_visible(s_dots[i], true);
+                    lv_obj_set_pos(s_dots[i], 48 + (int)i * 14, active ? 31 : 35);
+                    lv_obj_set_size(s_dots[i], active ? 8 : 5, active ? 8 : 5);
+                }
+            }
+        } else if (status->state == DISPLAY_STATE_ERROR) {
+            lv_label_set_text(s_status_label, "!");
+            display_set_visible(s_status_label, true);
+            lv_obj_align(s_status_label, LV_ALIGN_CENTER, 0, -12);
+            display_set_meter((frame % 2U) ? 100 : 12);
+        } else {
+            lv_label_set_text(s_status_label, "OK");
+            display_set_visible(s_status_label, true);
+            lv_obj_align(s_status_label, LV_ALIGN_CENTER, 0, -14);
+            display_set_meter(100);
+        }
+
         lvgl_port_unlock();
     }
 }
@@ -222,18 +397,25 @@ static void display_task(void *arg)
     char title[24];
     char detail[32];
     display_status_t status;
-    display_state_t last_state = DISPLAY_STATE_ERROR;
-    uint32_t last_elapsed = UINT32_MAX;
-    uint32_t last_total = UINT32_MAX;
+    uint32_t frame = 0;
 
     while (1) {
         display_copy_status(&status);
 
+        if (status.state == DISPLAY_STATE_WIFI &&
+            strcmp(status.wifi_status, "connected") == 0 &&
+            display_elapsed_from_start(&status) >= DISPLAY_WIFI_CONNECTED_HOLD_SEC) {
+            display_set_idle();
+            display_copy_status(&status);
+        }
+
         if (s_audio_buf != NULL) {
-            if (status.state == DISPLAY_STATE_LISTENING && !s_audio_buf->recording) {
+            audio_buffer_state_t audio_state;
+            audio_buffer_get_state(s_audio_buf, &audio_state);
+            if (status.state == DISPLAY_STATE_LISTENING && !audio_state.recording) {
                 display_set_thinking(0);
                 display_copy_status(&status);
-            } else if (status.state == DISPLAY_STATE_ANSWERING && !s_audio_buf->playing) {
+            } else if (status.state == DISPLAY_STATE_ANSWERING && !audio_state.playing) {
                 display_set_idle();
                 display_copy_status(&status);
             }
@@ -250,13 +432,9 @@ static void display_task(void *arg)
             total = display_audio_total_sec();
         }
 
-        if (status.state != last_state || elapsed != last_elapsed || total != last_total) {
-            display_render_text(title, detail);
-            last_state = status.state;
-            last_elapsed = elapsed;
-            last_total = total;
-        }
+        display_render_status(title, detail, &status, elapsed, total, frame);
 
+        frame++;
         vTaskDelay(pdMS_TO_TICKS(DISPLAY_UPDATE_MS));
     }
 }
@@ -280,22 +458,46 @@ static esp_err_t display_create_lvgl_labels(void)
 
     s_title_label = lv_label_create(screen);
     s_detail_label = lv_label_create(screen);
-    if (s_title_label == NULL || s_detail_label == NULL) {
+    s_status_label = lv_label_create(screen);
+    s_meter_bg = lv_obj_create(screen);
+    s_meter_fill = lv_obj_create(screen);
+    s_eye = lv_obj_create(screen);
+    s_eye_glint = lv_obj_create(screen);
+    for (size_t i = 0; i < 3; ++i) {
+        s_dots[i] = lv_obj_create(screen);
+    }
+
+    if (s_title_label == NULL || s_detail_label == NULL || s_status_label == NULL ||
+        s_meter_bg == NULL || s_meter_fill == NULL || s_eye == NULL || s_eye_glint == NULL ||
+        s_dots[0] == NULL || s_dots[1] == NULL || s_dots[2] == NULL) {
         lvgl_port_unlock();
         return ESP_ERR_NO_MEM;
     }
 
     lv_obj_set_width(s_title_label, DISPLAY_H_RES);
     lv_obj_set_width(s_detail_label, DISPLAY_H_RES);
+    lv_obj_set_width(s_status_label, DISPLAY_H_RES);
     lv_label_set_long_mode(s_title_label, LV_LABEL_LONG_CLIP);
     lv_label_set_long_mode(s_detail_label, LV_LABEL_LONG_CLIP);
+    lv_label_set_long_mode(s_status_label, LV_LABEL_LONG_CLIP);
     lv_obj_set_style_text_align(s_title_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_align(s_detail_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_align(s_status_label, LV_TEXT_ALIGN_CENTER, 0);
+
+    display_set_box_style(s_meter_bg, false, 3);
+    display_set_box_style(s_meter_fill, true, 2);
+    display_set_box_style(s_eye, false, LV_RADIUS_CIRCLE);
+    display_set_box_style(s_eye_glint, true, LV_RADIUS_CIRCLE);
+    for (size_t i = 0; i < 3; ++i) {
+        display_set_box_style(s_dots[i], true, LV_RADIUS_CIRCLE);
+    }
 
     lv_label_set_text(s_title_label, "Ready");
     lv_label_set_text(s_detail_label, "Ask me anything");
-    lv_obj_align(s_title_label, LV_ALIGN_TOP_MID, 0, 8);
-    lv_obj_align(s_detail_label, LV_ALIGN_CENTER, 0, 8);
+    lv_label_set_text(s_status_label, "");
+    lv_obj_align(s_title_label, LV_ALIGN_TOP_MID, 0, 3);
+    lv_obj_align(s_detail_label, LV_ALIGN_BOTTOM_MID, 0, -3);
+    display_hide_motion_objects();
 
     lvgl_port_unlock();
     return ESP_OK;
