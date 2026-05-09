@@ -1,6 +1,7 @@
 #ifndef DISPLAY_H
 #define DISPLAY_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include <esp_err.h>
@@ -36,6 +37,9 @@ void display_set_thinking(uint32_t sec);
 void display_set_answering(uint32_t current_sec, uint32_t total_sec);
 void display_set_status(const char *title, const char *detail);
 void display_set_wifi_status(const char *status);
+display_state_t display_get_state(void);
+void display_set_low_power_overlay(bool enable);
+void display_set_panel_power(bool enable);
 void display_set_error(void);
 
 #ifdef __cplusplus

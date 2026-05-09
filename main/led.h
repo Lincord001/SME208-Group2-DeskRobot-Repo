@@ -1,6 +1,7 @@
 #ifndef LED_H
 #define LED_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include <esp_err.h>
@@ -20,5 +21,6 @@ typedef struct {
 
 esp_err_t led_start_breath_effect(void);
 QueueHandle_t led_get_key_event_queue_handle(void);
+void led_set_low_power(bool enable);
 
 #endif // LED_H

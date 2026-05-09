@@ -51,6 +51,7 @@ static led_strip_handle_t s_led_strip;
 static QueueHandle_t s_key_event_queue;
 static TaskHandle_t s_led_worker_handle;
 static bool s_effect_started;
+static volatile bool s_low_power;
 
 static size_t s_current_color_idx;
 static int s_breathing_step;
@@ -124,6 +125,12 @@ static void led_worker_task(void *arg)
     (void)arg;
 
     while (1) {
+        if (s_low_power) {
+            (void)led_render_rgb((led_rgb_t){0, 0, 0});
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+
         led_key_event_message_t msg;
         BaseType_t received = xQueueReceive(s_key_event_queue, &msg, pdMS_TO_TICKS(BREATHING_PERIOD_MS));
         if (received == pdPASS) {
@@ -145,6 +152,18 @@ static void led_worker_task(void *arg)
 QueueHandle_t led_get_key_event_queue_handle(void)
 {
     return s_key_event_queue;
+}
+
+void led_set_low_power(bool enable)
+{
+    if (!s_effect_started) {
+        return;
+    }
+
+    s_low_power = enable;
+    if (enable) {
+        (void)led_render_rgb((led_rgb_t){0, 0, 0});
+    }
 }
 
 esp_err_t led_start_breath_effect(void)

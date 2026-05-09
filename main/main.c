@@ -26,6 +26,7 @@
 #include "display.h"
 #include "key.h"
 #include "led.h"
+#include "power_manager.h"
 #include "servo.h"
 #include "voice_assistant.h"
 #include "wifi_network.h"
@@ -58,6 +59,8 @@ static void main_key_task(void *arg)
         if (xQueueReceive(s_main_key_queue, &msg, portMAX_DELAY) != pdPASS) {
             continue;
         }
+
+        power_manager_notify_activity();
 
         /* ── 音频控制逻辑（不阻塞，仅设置标志位）─────── */
         audio_buffer_state_t audio_state;
@@ -264,6 +267,11 @@ void app_main(void)
     err = servo_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "servo_init: %s", esp_err_to_name(err));
+    }
+
+    err = power_manager_init(&s_audio_buf);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "power_manager_init: %s", esp_err_to_name(err));
     }
 
     ESP_LOGI(TAG,

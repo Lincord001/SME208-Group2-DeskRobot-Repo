@@ -59,6 +59,8 @@ static SemaphoreHandle_t s_state_mutex;
 static TaskHandle_t s_task_handle;
 static bool s_initialized;
 static bool s_task_started;
+static volatile bool s_low_power_overlay;
+static volatile bool s_panel_powered = true;
 
 static i2c_master_bus_handle_t s_i2c_bus;
 static esp_lcd_panel_io_handle_t s_panel_io;
@@ -79,6 +81,9 @@ static uint32_t s_audio_sample_rate_hz;
 static display_status_t s_status = {
     .state = DISPLAY_STATE_IDLE,
 };
+
+static void display_set_visible(lv_obj_t *obj, bool visible);
+static void display_hide_motion_objects(void);
 
 static uint32_t display_elapsed_from_start(const display_status_t *status)
 {
@@ -104,11 +109,62 @@ static void display_store_status(display_state_t state,
     }
 
     if (xSemaphoreTake(s_state_mutex, portMAX_DELAY) == pdTRUE) {
+        if (state != DISPLAY_STATE_IDLE) {
+            s_low_power_overlay = false;
+            display_set_panel_power(true);
+        }
         s_status.state = state;
         s_status.elapsed_sec = elapsed_sec;
         s_status.total_sec = total_sec;
         s_status.state_start_tick = xTaskGetTickCount();
         xSemaphoreGive(s_state_mutex);
+    }
+}
+
+static void display_render_low_power(uint32_t frame)
+{
+    if (!s_panel_powered || s_title_label == NULL || s_detail_label == NULL) {
+        return;
+    }
+
+    if (lvgl_port_lock(0)) {
+        lv_label_set_text(s_title_label, "");
+        lv_label_set_text(s_detail_label, "");
+        display_hide_motion_objects();
+
+        uint32_t cycle = frame % 28U;
+        bool burst = cycle >= 23U;
+        int x = 10 + (int)((cycle * 88U) / 27U);
+        int y = 48 - (int)((cycle * 34U) / 27U);
+
+        if (!burst) {
+            const char *text = "z";
+            if (cycle > 8U) {
+                text = "Z";
+            }
+            if (cycle > 16U) {
+                text = "ZZ";
+            }
+
+            int size = 10 + (int)(cycle / 2U);
+            lv_label_set_text(s_status_label, text);
+            display_set_visible(s_status_label, true);
+            lv_obj_set_pos(s_status_label, x, y);
+
+            display_set_visible(s_eye, true);
+            lv_obj_set_pos(s_eye, x - 3, y - 3);
+            lv_obj_set_size(s_eye, size, size);
+        } else {
+            lv_label_set_text(s_status_label, "");
+            display_set_visible(s_status_label, false);
+            for (size_t i = 0; i < 3; ++i) {
+                display_set_visible(s_dots[i], true);
+                lv_obj_set_pos(s_dots[i], 94 + (int)i * 8, 13 + ((i == 1) ? -4 : 4));
+                lv_obj_set_size(s_dots[i], 3 + (int)i, 3 + (int)i);
+            }
+        }
+
+        lvgl_port_unlock();
     }
 }
 
@@ -421,6 +477,24 @@ static void display_task(void *arg)
             }
         }
 
+        if (s_low_power_overlay) {
+            if (status.state == DISPLAY_STATE_IDLE) {
+                display_render_low_power(frame);
+            } else {
+                s_low_power_overlay = false;
+                display_set_panel_power(true);
+            }
+            frame++;
+            vTaskDelay(pdMS_TO_TICKS(DISPLAY_UPDATE_MS));
+            continue;
+        }
+
+        if (!s_panel_powered) {
+            frame++;
+            vTaskDelay(pdMS_TO_TICKS(DISPLAY_UPDATE_MS));
+            continue;
+        }
+
         display_format_text(&status, title, sizeof(title), detail, sizeof(detail));
 
         uint32_t elapsed = display_elapsed_from_start(&status);
@@ -594,6 +668,7 @@ esp_err_t display_init(void)
     ESP_RETURN_ON_ERROR(esp_lcd_panel_init(s_panel), TAG, "panel driver init failed");
     ESP_RETURN_ON_ERROR(display_apply_orientation(), TAG, "panel orientation failed");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(s_panel, true), TAG, "panel on failed");
+    s_panel_powered = true;
 
     const lvgl_port_cfg_t lvgl_cfg = ESP_LVGL_PORT_INIT_CONFIG();
     ESP_RETURN_ON_ERROR(lvgl_port_init(&lvgl_cfg), TAG, "LVGL port init failed");
@@ -743,6 +818,48 @@ void display_set_wifi_status(const char *status)
         }
         xSemaphoreGive(s_state_mutex);
     }
+}
+
+display_state_t display_get_state(void)
+{
+    display_status_t status = {
+        .state = DISPLAY_STATE_IDLE,
+    };
+    display_copy_status(&status);
+    return status.state;
+}
+
+void display_set_low_power_overlay(bool enable)
+{
+    if (!s_initialized) {
+        return;
+    }
+
+    if (enable) {
+        if (display_get_state() != DISPLAY_STATE_IDLE) {
+            return;
+        }
+        display_set_panel_power(true);
+    }
+    s_low_power_overlay = enable;
+}
+
+void display_set_panel_power(bool enable)
+{
+    if (!s_initialized || s_panel == NULL) {
+        return;
+    }
+    if (s_panel_powered == enable) {
+        return;
+    }
+
+    esp_err_t err = esp_lcd_panel_disp_on_off(s_panel, enable);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "display power %s failed: %s",
+                 enable ? "on" : "off", esp_err_to_name(err));
+        return;
+    }
+    s_panel_powered = enable;
 }
 
 void display_set_error(void)
