@@ -272,7 +272,7 @@ esp_err_t wifi_network_set_power_save(bool enable)
         return ESP_OK;
     }
 
-    wifi_ps_type_t ps_type = enable ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE;
+    wifi_ps_type_t ps_type = enable ? WIFI_PS_MAX_MODEM : WIFI_PS_NONE;
     err = esp_wifi_set_ps(ps_type);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "WiFi power save %s failed: %s",

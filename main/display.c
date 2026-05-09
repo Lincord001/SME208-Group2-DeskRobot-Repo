@@ -35,6 +35,7 @@
 #define DISPLAY_TASK_STACK_SIZE  4096
 #define DISPLAY_TASK_PRIORITY    4
 #define DISPLAY_UPDATE_MS        250
+#define DISPLAY_PANEL_OFF_UPDATE_MS 1000
 #define DISPLAY_ROTATE_180       1
 #define DISPLAY_WIFI_CONNECTED_HOLD_SEC 5
 
@@ -491,7 +492,7 @@ static void display_task(void *arg)
 
         if (!s_panel_powered) {
             frame++;
-            vTaskDelay(pdMS_TO_TICKS(DISPLAY_UPDATE_MS));
+            vTaskDelay(pdMS_TO_TICKS(DISPLAY_PANEL_OFF_UPDATE_MS));
             continue;
         }
 

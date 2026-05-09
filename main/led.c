@@ -8,6 +8,7 @@
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include <freertos/semphr.h>
 #include <freertos/task.h>
 #include <led_strip.h>
 
@@ -25,6 +26,7 @@
 // Warning display configuration
 #define WARNING_SHOW_MS 1000
 #define LED_WARNING_BRIGHTNESS 10 // 0-255, controls warning color max brightness (~31%)
+#define LED_LOW_POWER_WAIT_MS 1000
 
 #define LED_TASK_STACK_SIZE 3072
 #define LED_TASK_PRIORITY 5
@@ -49,9 +51,11 @@ static const led_rgb_t s_warning_yellow = {255, 255, 0};
 
 static led_strip_handle_t s_led_strip;
 static QueueHandle_t s_key_event_queue;
+static SemaphoreHandle_t s_render_mutex;
 static TaskHandle_t s_led_worker_handle;
 static bool s_effect_started;
 static volatile bool s_low_power;
+static bool s_low_power_rendered;
 
 static size_t s_current_color_idx;
 static int s_breathing_step;
@@ -60,9 +64,22 @@ static bool s_next_warning_is_orange = true;
 
 static esp_err_t led_render_rgb(led_rgb_t color)
 {
-    ESP_RETURN_ON_ERROR(led_strip_set_pixel(s_led_strip, 0, color.red, color.green, color.blue), TAG,
-                        "Failed to set pixel");
-    ESP_RETURN_ON_ERROR(led_strip_refresh(s_led_strip), TAG, "Failed to refresh strip");
+    if (s_render_mutex != NULL) {
+        if (xSemaphoreTake(s_render_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+            return ESP_ERR_TIMEOUT;
+        }
+    }
+
+    esp_err_t err = led_strip_set_pixel(s_led_strip, 0, color.red, color.green, color.blue);
+    if (err == ESP_OK) {
+        err = led_strip_refresh(s_led_strip);
+    }
+
+    if (s_render_mutex != NULL) {
+        xSemaphoreGive(s_render_mutex);
+    }
+
+    ESP_RETURN_ON_ERROR(err, TAG, "Failed to refresh strip");
     return ESP_OK;
 }
 
@@ -126,8 +143,11 @@ static void led_worker_task(void *arg)
 
     while (1) {
         if (s_low_power) {
-            (void)led_render_rgb((led_rgb_t){0, 0, 0});
-            vTaskDelay(pdMS_TO_TICKS(200));
+            if (!s_low_power_rendered) {
+                (void)led_render_rgb((led_rgb_t){0, 0, 0});
+                s_low_power_rendered = true;
+            }
+            (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(LED_LOW_POWER_WAIT_MS));
             continue;
         }
 
@@ -161,8 +181,15 @@ void led_set_low_power(bool enable)
     }
 
     s_low_power = enable;
+    if (!enable) {
+        s_low_power_rendered = false;
+        if (s_led_worker_handle != NULL) {
+            xTaskNotifyGive(s_led_worker_handle);
+        }
+    }
     if (enable) {
         (void)led_render_rgb((led_rgb_t){0, 0, 0});
+        s_low_power_rendered = true;
     }
 }
 
@@ -196,11 +223,21 @@ esp_err_t led_start_breath_effect(void)
         return ESP_ERR_NO_MEM;
     }
 
+    s_render_mutex = xSemaphoreCreateMutex();
+    if (s_render_mutex == NULL) {
+        ESP_LOGE(TAG, "Failed to create LED render mutex");
+        vQueueDelete(s_key_event_queue);
+        s_key_event_queue = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+
     if (xTaskCreate(led_worker_task, "led_worker_task", LED_TASK_STACK_SIZE, NULL, LED_TASK_PRIORITY,
                     &s_led_worker_handle) != pdPASS) {
         ESP_LOGE(TAG, "Failed to create led_worker_task");
         vQueueDelete(s_key_event_queue);
         s_key_event_queue = NULL;
+        vSemaphoreDelete(s_render_mutex);
+        s_render_mutex = NULL;
         return ESP_FAIL;
     }
 

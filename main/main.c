@@ -17,9 +17,12 @@
 
 #include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <esp_pm.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
+
+#include "sdkconfig.h"
 
 #include "audio_mic.h"
 #include "audio_spk.h"
@@ -39,6 +42,7 @@ static const char *TAG = "MAIN";
 #define AUDIO_SAMPLE_RATE  24000
 #define AUDIO_MAX_SECS     20
 #define AUDIO_BUF_BYTES    (AUDIO_SAMPLE_RATE * sizeof(int16_t) * AUDIO_MAX_SECS)
+#define POWER_MIN_CPU_FREQ_MHZ 80
 
 /* ── 中转队列 ────────────────────────────────────────────
  * main_key_task 从此队列读取按键事件，按 key_id 分发后
@@ -47,6 +51,29 @@ static const char *TAG = "MAIN";
 
 static audio_buffer_t s_audio_buf;
 static QueueHandle_t  s_main_key_queue;
+
+static void main_configure_power_management(void)
+{
+#if CONFIG_PM_ENABLE
+    esp_pm_config_t pm_config = {
+        .max_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+        .min_freq_mhz = POWER_MIN_CPU_FREQ_MHZ,
+        .light_sleep_enable = false,
+    };
+
+    esp_err_t err = esp_pm_configure(&pm_config);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_pm_configure failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    ESP_LOGI(TAG, "Dynamic frequency scaling enabled: %u-%u MHz, light sleep off",
+             (unsigned)pm_config.min_freq_mhz,
+             (unsigned)pm_config.max_freq_mhz);
+#else
+    ESP_LOGW(TAG, "Dynamic frequency scaling disabled: CONFIG_PM_ENABLE is not set");
+#endif
+}
 
 /* ── 按键分发任务 ─────────────────────────────────────── */
 static void main_key_task(void *arg)
@@ -181,6 +208,8 @@ static void main_key_task(void *arg)
 void app_main(void)
 {
     esp_err_t err;
+
+    main_configure_power_management();
 
     /* 1. 分配 PSRAM 音频缓冲区 */
     s_audio_buf.buffer = (int16_t *)heap_caps_malloc(
