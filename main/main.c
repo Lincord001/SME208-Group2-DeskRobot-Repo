@@ -7,7 +7,7 @@
  *   - 按键事件通过中转队列分发：
  *       K1 → 切换录音 开/停
  *       K2 → 切换播放 开/停
- *       K8 → 切换播放音量挡位
+ *       K8 → 显示运行状态页；长按进入 Wi-Fi 配置
  *       所有事件同步转发给 LED 队列（保持按键闪灯效果）
  */
 
@@ -31,6 +31,7 @@
 #include "led.h"
 #include "power_manager.h"
 #include "servo.h"
+#include "system_status.h"
 #include "voice_assistant.h"
 #include "wifi_network.h"
 
@@ -135,7 +136,7 @@ static void main_key_task(void *arg)
             }
             break;
 
-        case 8: /* K8：切换播放音量挡位 */
+        case 8: /* K8: status page; long press starts WiFi config mode */
             if (msg.event == LED_KEY_EVENT_LONG_PRESS_START) {
                 err = wifi_network_start_config_mode(false);
                 if (err != ESP_OK) {
@@ -144,8 +145,9 @@ static void main_key_task(void *arg)
                     ESP_LOGI(TAG, "K8: WiFi config mode started");
                 }
             } else {
-                audio_spk_cycle_volume_level();
-                ESP_LOGI(TAG, "K8: volume level switched");
+                system_status_show_next_page();
+                system_status_log_snapshot();
+                ESP_LOGI(TAG, "K8: status page switched");
             }
             break;
 
@@ -210,6 +212,11 @@ void app_main(void)
     esp_err_t err;
 
     main_configure_power_management();
+
+    err = system_status_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "system_status_init: %s", esp_err_to_name(err));
+    }
 
     /* 1. 分配 PSRAM 音频缓冲区 */
     s_audio_buf.buffer = (int16_t *)heap_caps_malloc(
@@ -304,5 +311,5 @@ void app_main(void)
     }
 
     ESP_LOGI(TAG,
-             "System ready  |  K1=录音开/停  K2=播放开/停  K3/K4=垂直-/+  K5/K6=水平-/+  K8=音量切换");
+             "System ready  |  K1=录音开/停  K2=播放开/停  K3/K4=垂直-/+  K5/K6=水平-/+  K8=状态页  K8长按=WiFi配置");
 }

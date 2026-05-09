@@ -14,6 +14,7 @@ extern "C" {
 esp_err_t power_manager_init(audio_buffer_t *audio_buffer);
 void power_manager_notify_activity(void);
 bool power_manager_is_low_power(void);
+const char *power_manager_get_stage_string(void);
 
 #ifdef __cplusplus
 }

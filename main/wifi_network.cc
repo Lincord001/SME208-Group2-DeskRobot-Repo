@@ -291,6 +291,11 @@ bool wifi_network_is_connected(void)
     return s_connected && WifiManager::GetInstance().IsConnected();
 }
 
+bool wifi_network_is_power_save_enabled(void)
+{
+    return s_power_save_enabled;
+}
+
 const char *wifi_network_get_status_string(void)
 {
     return s_status;

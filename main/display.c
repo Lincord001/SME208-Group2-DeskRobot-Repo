@@ -418,11 +418,26 @@ static void display_render_status(const char *title,
             bool complete = strcmp(status->status_title, "Recorded") == 0 ||
                             strcmp(status->status_title, "Recognized") == 0 ||
                             strcmp(status->status_title, "Voice ready") == 0;
-            lv_label_set_text(s_status_label, complete ? "DONE" : "WORK");
+            bool system_page = strncmp(status->status_title, "WiFi", 4) == 0 ||
+                               strncmp(status->status_title, "Heap", 4) == 0 ||
+                               strncmp(status->status_title, "ASR", 3) == 0 ||
+                               strncmp(status->status_title, "LLM", 3) == 0 ||
+                               strncmp(status->status_title, "TTS", 3) == 0;
+            lv_label_set_text(s_status_label, complete ? "DONE" : (system_page ? "INFO" : "WORK"));
             display_set_visible(s_status_label, true);
             lv_obj_align(s_status_label, LV_ALIGN_CENTER, 0, -14);
             if (complete) {
                 display_set_meter(100);
+            } else if (system_page) {
+                display_set_visible(s_meter_bg, true);
+                display_set_visible(s_meter_fill, false);
+                lv_obj_set_pos(s_meter_bg, 18, 42);
+                lv_obj_set_size(s_meter_bg, 92, 8);
+                for (size_t i = 0; i < 3; ++i) {
+                    display_set_visible(s_dots[i], true);
+                    lv_obj_set_pos(s_dots[i], 43 + (int)i * 18, 32);
+                    lv_obj_set_size(s_dots[i], 8, 8);
+                }
             } else {
                 for (size_t i = 0; i < 3; ++i) {
                     bool active = ((frame / 2U) % 3U) == i;
