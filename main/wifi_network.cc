@@ -23,6 +23,7 @@ static constexpr TickType_t INITIAL_CONNECT_TIMEOUT = pdMS_TO_TICKS(45000);
 static bool s_initialized;
 static bool s_started;
 static bool s_started_with_saved_config;
+static bool s_power_save_enabled;
 static volatile bool s_connected;
 static portMUX_TYPE s_status_lock = portMUX_INITIALIZER_UNLOCKED;
 static char s_status[32] = "WiFi init";
@@ -257,6 +258,31 @@ esp_err_t wifi_network_start_config_mode(bool clear_saved)
     ESP_LOGI(TAG, "Starting WiFi config mode by request");
     wifi.StartConfigAp();
 
+    return ESP_OK;
+}
+
+esp_err_t wifi_network_set_power_save(bool enable)
+{
+    esp_err_t err = wifi_network_init();
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    if (s_power_save_enabled == enable) {
+        return ESP_OK;
+    }
+
+    wifi_ps_type_t ps_type = enable ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE;
+    err = esp_wifi_set_ps(ps_type);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "WiFi power save %s failed: %s",
+                 enable ? "enable" : "disable",
+                 esp_err_to_name(err));
+        return err;
+    }
+
+    s_power_save_enabled = enable;
+    ESP_LOGI(TAG, "WiFi power save %s", enable ? "enabled" : "disabled");
     return ESP_OK;
 }
 

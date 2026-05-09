@@ -8,6 +8,7 @@
 
 #include "display.h"
 #include "led.h"
+#include "wifi_network.h"
 
 #define POWER_STAGE1_IDLE_MS 10000
 #define POWER_STAGE2_IDLE_MS 20000
@@ -48,6 +49,7 @@ static void power_manager_set_stage(power_stage_t stage)
 
     switch (stage) {
     case POWER_STAGE_AWAKE:
+        (void)wifi_network_set_power_save(false);
         display_set_panel_power(true);
         display_set_low_power_overlay(false);
         led_set_low_power(false);
@@ -65,6 +67,9 @@ static void power_manager_set_stage(power_stage_t stage)
         display_set_low_power_overlay(false);
         display_set_panel_power(false);
         led_set_low_power(true);
+        if (wifi_network_is_connected()) {
+            (void)wifi_network_set_power_save(true);
+        }
         ESP_LOGI(TAG, "Power stage: display off");
         break;
     }

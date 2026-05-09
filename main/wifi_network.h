@@ -12,6 +12,7 @@ extern "C" {
 esp_err_t wifi_network_init(void);
 esp_err_t wifi_network_start(void);
 esp_err_t wifi_network_start_config_mode(bool clear_saved);
+esp_err_t wifi_network_set_power_save(bool enable);
 bool wifi_network_is_connected(void);
 const char *wifi_network_get_status_string(void);
 
