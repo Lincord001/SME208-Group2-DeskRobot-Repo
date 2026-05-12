@@ -41,6 +41,10 @@
 #define DISPLAY_PANEL_OFF_UPDATE_MS 1000
 #define DISPLAY_ROTATE_180       1
 #define DISPLAY_WIFI_CONNECTED_HOLD_SEC 5
+#define DISPLAY_CINNA_BLINK_PERIOD_FRAMES 8
+#define DISPLAY_CINNA_TWINKLE_PERIOD_FRAMES 16
+#define DISPLAY_CINNA_LEFT_EYE_ARC_PIXELS  5
+#define DISPLAY_CINNA_RIGHT_EYE_ARC_PIXELS 4
 
 #define SSD1306_CMD_SEG_REMAP_NORMAL   0xA0
 #define SSD1306_CMD_SEG_REMAP_REVERSE  0xA1
@@ -78,6 +82,14 @@ typedef enum {
     DISPLAY_CINNA_PART_COUNT,
 } display_cinnamoroll_part_t;
 
+typedef enum {
+    DISPLAY_CINNA_DECOR_HEART_L = 0,
+    DISPLAY_CINNA_DECOR_HEART_R,
+    DISPLAY_CINNA_DECOR_STAR_L,
+    DISPLAY_CINNA_DECOR_STAR_R,
+    DISPLAY_CINNA_DECOR_COUNT,
+} display_cinnamoroll_decor_t;
+
 static SemaphoreHandle_t s_state_mutex;
 static TaskHandle_t s_task_handle;
 static bool s_initialized;
@@ -99,6 +111,11 @@ static lv_obj_t *s_eye_glint;
 static lv_obj_t *s_dots[3];
 static lv_obj_t *s_cinna_image;
 static lv_obj_t *s_cinna_parts[DISPLAY_CINNA_PART_COUNT];
+static lv_obj_t *s_cinna_eye_cover_l;
+static lv_obj_t *s_cinna_eye_cover_r;
+static lv_obj_t *s_cinna_eye_arc_l[DISPLAY_CINNA_LEFT_EYE_ARC_PIXELS];
+static lv_obj_t *s_cinna_eye_arc_r[DISPLAY_CINNA_RIGHT_EYE_ARC_PIXELS];
+static lv_obj_t *s_cinna_decor_covers[DISPLAY_CINNA_DECOR_COUNT];
 static uint8_t s_i2c_hw_addr = DISPLAY_I2C_HW_ADDR;
 
 static const audio_buffer_t *s_audio_buf;
@@ -108,6 +125,7 @@ static display_status_t s_status = {
 };
 
 static void display_set_visible(lv_obj_t *obj, bool visible);
+static void display_set_inverted_theme(bool inverted);
 static void display_hide_motion_objects(void);
 
 static uint32_t display_elapsed_from_start(const display_status_t *status)
@@ -153,6 +171,7 @@ static void display_render_low_power(uint32_t frame)
     }
 
     if (lvgl_port_lock(0)) {
+        display_set_inverted_theme(true);
         lv_label_set_text(s_title_label, "");
         lv_label_set_text(s_detail_label, "");
         display_hide_motion_objects();
@@ -331,6 +350,51 @@ static void display_set_box_style(lv_obj_t *obj, bool filled, int radius)
     lv_obj_set_style_pad_all(obj, 0, 0);
 }
 
+static void display_set_filled_box_style(lv_obj_t *obj, lv_color_t color, int radius)
+{
+    lv_obj_set_style_bg_color(obj, color, 0);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(obj, 0, 0);
+    lv_obj_set_style_radius(obj, radius, 0);
+    lv_obj_set_style_pad_all(obj, 0, 0);
+}
+
+static void display_set_fg_color(lv_obj_t *obj, lv_color_t color)
+{
+    if (obj == NULL) {
+        return;
+    }
+
+    lv_obj_set_style_text_color(obj, color, 0);
+    lv_obj_set_style_bg_color(obj, color, 0);
+    lv_obj_set_style_border_color(obj, color, 0);
+}
+
+static void display_set_inverted_theme(bool inverted)
+{
+    if (s_lvgl_disp == NULL) {
+        return;
+    }
+
+    lv_color_t bg = inverted ? lv_color_white() : lv_color_black();
+    lv_color_t fg = inverted ? lv_color_black() : lv_color_white();
+    lv_obj_t *screen = lv_display_get_screen_active(s_lvgl_disp);
+
+    lv_obj_set_style_bg_color(screen, bg, 0);
+    lv_obj_set_style_text_color(screen, fg, 0);
+
+    display_set_fg_color(s_title_label, fg);
+    display_set_fg_color(s_detail_label, fg);
+    display_set_fg_color(s_status_label, fg);
+    display_set_fg_color(s_meter_bg, fg);
+    display_set_fg_color(s_meter_fill, fg);
+    display_set_fg_color(s_eye, fg);
+    display_set_fg_color(s_eye_glint, fg);
+    for (size_t i = 0; i < 3; ++i) {
+        display_set_fg_color(s_dots[i], fg);
+    }
+}
+
 static void display_set_visible(lv_obj_t *obj, bool visible)
 {
     if (obj == NULL) {
@@ -364,6 +428,17 @@ static void display_hide_motion_objects(void)
     display_set_visible(s_eye, false);
     display_set_visible(s_eye_glint, false);
     display_set_visible(s_cinna_image, false);
+    display_set_visible(s_cinna_eye_cover_l, false);
+    display_set_visible(s_cinna_eye_cover_r, false);
+    for (size_t i = 0; i < DISPLAY_CINNA_LEFT_EYE_ARC_PIXELS; ++i) {
+        display_set_visible(s_cinna_eye_arc_l[i], false);
+    }
+    for (size_t i = 0; i < DISPLAY_CINNA_RIGHT_EYE_ARC_PIXELS; ++i) {
+        display_set_visible(s_cinna_eye_arc_r[i], false);
+    }
+    for (size_t i = 0; i < DISPLAY_CINNA_DECOR_COUNT; ++i) {
+        display_set_visible(s_cinna_decor_covers[i], false);
+    }
     for (size_t i = 0; i < 3; ++i) {
         display_set_visible(s_dots[i], false);
     }
@@ -382,6 +457,78 @@ static uint8_t display_triangle_wave(uint32_t phase, uint32_t period, uint8_t ma
     return (uint8_t)(((period - pos) * max_value) / half);
 }
 
+static bool display_cinnamoroll_blink_closed(uint32_t frame)
+{
+    uint32_t phase = frame % DISPLAY_CINNA_BLINK_PERIOD_FRAMES;
+    return phase == 0 || phase == 2;
+}
+
+static void display_set_cinnamoroll_twinkle(uint32_t frame)
+{
+    static const uint8_t decor_rects[DISPLAY_CINNA_DECOR_COUNT][4] = {
+        [DISPLAY_CINNA_DECOR_HEART_L] = {20, 13, 9, 8},
+        [DISPLAY_CINNA_DECOR_HEART_R] = {92, 7, 9, 8},
+        [DISPLAY_CINNA_DECOR_STAR_L] = {27, 49, 7, 6},
+        [DISPLAY_CINNA_DECOR_STAR_R] = {95, 49, 7, 6},
+    };
+    for (size_t i = 0; i < DISPLAY_CINNA_DECOR_COUNT; ++i) {
+        uint32_t phase = frame % DISPLAY_CINNA_TWINKLE_PERIOD_FRAMES;
+        bool hidden = phase == (uint32_t)i * 4U;
+
+        display_set_visible(s_cinna_decor_covers[i], hidden);
+        if (hidden) {
+            lv_obj_set_pos(s_cinna_decor_covers[i], decor_rects[i][0], decor_rects[i][1]);
+            lv_obj_set_size(s_cinna_decor_covers[i], decor_rects[i][2], decor_rects[i][3]);
+            lv_obj_move_foreground(s_cinna_decor_covers[i]);
+        }
+    }
+}
+
+static void display_set_cinnamoroll_blink(bool closed)
+{
+    display_set_visible(s_cinna_eye_cover_l, closed);
+    display_set_visible(s_cinna_eye_cover_r, closed);
+    for (size_t i = 0; i < DISPLAY_CINNA_LEFT_EYE_ARC_PIXELS; ++i) {
+        display_set_visible(s_cinna_eye_arc_l[i], closed);
+    }
+    for (size_t i = 0; i < DISPLAY_CINNA_RIGHT_EYE_ARC_PIXELS; ++i) {
+        display_set_visible(s_cinna_eye_arc_r[i], closed);
+    }
+
+    if (!closed) {
+        return;
+    }
+
+    lv_obj_set_pos(s_cinna_eye_cover_l, 48, 25);
+    lv_obj_set_size(s_cinna_eye_cover_l, 7, 8);
+    lv_obj_set_pos(s_cinna_eye_cover_r, 74, 25);
+    lv_obj_set_size(s_cinna_eye_cover_r, 6, 8);
+
+    static const uint8_t left_arc[DISPLAY_CINNA_LEFT_EYE_ARC_PIXELS][2] = {
+        {49, 30}, {50, 29}, {51, 29}, {52, 29}, {53, 30},
+    };
+    static const uint8_t right_arc[DISPLAY_CINNA_RIGHT_EYE_ARC_PIXELS][2] = {
+        {75, 30}, {76, 29}, {77, 29}, {78, 30},
+    };
+    for (size_t i = 0; i < DISPLAY_CINNA_LEFT_EYE_ARC_PIXELS; ++i) {
+        lv_obj_set_pos(s_cinna_eye_arc_l[i], left_arc[i][0], left_arc[i][1]);
+        lv_obj_set_size(s_cinna_eye_arc_l[i], 1, 2);
+    }
+    for (size_t i = 0; i < DISPLAY_CINNA_RIGHT_EYE_ARC_PIXELS; ++i) {
+        lv_obj_set_pos(s_cinna_eye_arc_r[i], right_arc[i][0], right_arc[i][1]);
+        lv_obj_set_size(s_cinna_eye_arc_r[i], 1, 2);
+    }
+
+    lv_obj_move_foreground(s_cinna_eye_cover_l);
+    lv_obj_move_foreground(s_cinna_eye_cover_r);
+    for (size_t i = 0; i < DISPLAY_CINNA_LEFT_EYE_ARC_PIXELS; ++i) {
+        lv_obj_move_foreground(s_cinna_eye_arc_l[i]);
+    }
+    for (size_t i = 0; i < DISPLAY_CINNA_RIGHT_EYE_ARC_PIXELS; ++i) {
+        lv_obj_move_foreground(s_cinna_eye_arc_r[i]);
+    }
+}
+
 static void display_render_status(const char *title,
                                   const char *detail,
                                   const display_status_t *status,
@@ -394,6 +541,7 @@ static void display_render_status(const char *title,
     }
 
     if (lvgl_port_lock(0)) {
+        display_set_inverted_theme(status->state == DISPLAY_STATE_CLOCK);
         lv_obj_set_style_text_font(s_title_label, LV_FONT_DEFAULT, 0);
         lv_obj_set_style_text_font(s_detail_label, LV_FONT_DEFAULT, 0);
         lv_obj_set_style_text_font(s_status_label, LV_FONT_DEFAULT, 0);
@@ -574,6 +722,8 @@ static void display_render_status(const char *title,
             display_set_visible(s_cinna_image, true);
             lv_obj_set_pos(s_cinna_image, 0, 0);
             lv_obj_move_foreground(s_cinna_image);
+            display_set_cinnamoroll_twinkle(frame);
+            display_set_cinnamoroll_blink(display_cinnamoroll_blink_closed(frame));
         } else if (status->state == DISPLAY_STATE_ERROR) {
             lv_label_set_text(s_status_label, "!");
             display_set_visible(s_status_label, true);
@@ -678,10 +828,21 @@ static esp_err_t display_create_lvgl_labels(void)
     s_detail_label = lv_label_create(screen);
     s_status_label = lv_label_create(screen);
     s_cinna_image = lv_image_create(screen);
+    s_cinna_eye_cover_l = lv_obj_create(screen);
+    s_cinna_eye_cover_r = lv_obj_create(screen);
     s_meter_bg = lv_obj_create(screen);
     s_meter_fill = lv_obj_create(screen);
     s_eye = lv_obj_create(screen);
     s_eye_glint = lv_obj_create(screen);
+    for (size_t i = 0; i < DISPLAY_CINNA_LEFT_EYE_ARC_PIXELS; ++i) {
+        s_cinna_eye_arc_l[i] = lv_obj_create(screen);
+    }
+    for (size_t i = 0; i < DISPLAY_CINNA_RIGHT_EYE_ARC_PIXELS; ++i) {
+        s_cinna_eye_arc_r[i] = lv_obj_create(screen);
+    }
+    for (size_t i = 0; i < DISPLAY_CINNA_DECOR_COUNT; ++i) {
+        s_cinna_decor_covers[i] = lv_obj_create(screen);
+    }
     for (size_t i = 0; i < 3; ++i) {
         s_dots[i] = lv_obj_create(screen);
     }
@@ -690,11 +851,29 @@ static esp_err_t display_create_lvgl_labels(void)
     }
 
     if (s_title_label == NULL || s_detail_label == NULL || s_status_label == NULL ||
-        s_cinna_image == NULL ||
+        s_cinna_image == NULL || s_cinna_eye_cover_l == NULL || s_cinna_eye_cover_r == NULL ||
         s_meter_bg == NULL || s_meter_fill == NULL || s_eye == NULL || s_eye_glint == NULL ||
         s_dots[0] == NULL || s_dots[1] == NULL || s_dots[2] == NULL) {
         lvgl_port_unlock();
         return ESP_ERR_NO_MEM;
+    }
+    for (size_t i = 0; i < DISPLAY_CINNA_LEFT_EYE_ARC_PIXELS; ++i) {
+        if (s_cinna_eye_arc_l[i] == NULL) {
+            lvgl_port_unlock();
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    for (size_t i = 0; i < DISPLAY_CINNA_RIGHT_EYE_ARC_PIXELS; ++i) {
+        if (s_cinna_eye_arc_r[i] == NULL) {
+            lvgl_port_unlock();
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    for (size_t i = 0; i < DISPLAY_CINNA_DECOR_COUNT; ++i) {
+        if (s_cinna_decor_covers[i] == NULL) {
+            lvgl_port_unlock();
+            return ESP_ERR_NO_MEM;
+        }
     }
     for (size_t i = 0; i < DISPLAY_CINNA_PART_COUNT; ++i) {
         if (s_cinna_parts[i] == NULL) {
@@ -717,6 +896,18 @@ static esp_err_t display_create_lvgl_labels(void)
     lv_image_set_antialias(s_cinna_image, false);
     lv_obj_set_pos(s_cinna_image, 0, 0);
     lv_obj_set_size(s_cinna_image, DISPLAY_H_RES, DISPLAY_V_RES);
+
+    display_set_filled_box_style(s_cinna_eye_cover_l, lv_color_white(), 0);
+    display_set_filled_box_style(s_cinna_eye_cover_r, lv_color_white(), 0);
+    for (size_t i = 0; i < DISPLAY_CINNA_LEFT_EYE_ARC_PIXELS; ++i) {
+        display_set_filled_box_style(s_cinna_eye_arc_l[i], lv_color_black(), 0);
+    }
+    for (size_t i = 0; i < DISPLAY_CINNA_RIGHT_EYE_ARC_PIXELS; ++i) {
+        display_set_filled_box_style(s_cinna_eye_arc_r[i], lv_color_black(), 0);
+    }
+    for (size_t i = 0; i < DISPLAY_CINNA_DECOR_COUNT; ++i) {
+        display_set_filled_box_style(s_cinna_decor_covers[i], lv_color_white(), 0);
+    }
 
     display_set_box_style(s_meter_bg, false, 3);
     display_set_box_style(s_meter_fill, true, 2);
