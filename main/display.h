@@ -19,6 +19,7 @@ typedef enum {
     DISPLAY_STATE_ANSWERING,
     DISPLAY_STATE_WIFI,
     DISPLAY_STATE_STATUS,
+    DISPLAY_STATE_USAGE_GUIDE,
     DISPLAY_STATE_CLOCK,
     DISPLAY_STATE_CINNAMOROLL,
     DISPLAY_STATE_ERROR,
@@ -38,6 +39,11 @@ void display_set_listening(uint32_t sec);
 void display_set_thinking(uint32_t sec);
 void display_set_answering(uint32_t current_sec, uint32_t total_sec);
 void display_set_status(const char *title, const char *detail);
+void display_set_usage_guide_page(const char *title,
+                                  const char *detail,
+                                  uint8_t page,
+                                  uint8_t page_count);
+void display_set_usage_guide_mode(bool enable);
 void display_set_wifi_status(const char *status);
 void display_set_clock_mode(bool enable);
 void display_set_cinnamoroll_mode(bool enable);

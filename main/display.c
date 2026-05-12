@@ -304,6 +304,13 @@ static void display_format_text(const display_status_t *status,
                  status->status_detail[0] != '\0' ? status->status_detail : "");
         break;
 
+    case DISPLAY_STATE_USAGE_GUIDE:
+        snprintf(title, title_size, "%s",
+                 status->status_title[0] != '\0' ? status->status_title : "Guide");
+        snprintf(detail, detail_size, "%s",
+                 status->status_detail[0] != '\0' ? status->status_detail : "K7 next");
+        break;
+
     case DISPLAY_STATE_CLOCK: {
         time_t now;
         struct tm timeinfo;
@@ -687,6 +694,19 @@ static void display_render_status(const char *title,
                     lv_obj_set_size(s_dots[i], active ? 8 : 5, active ? 8 : 5);
                 }
             }
+        } else if (status->state == DISPLAY_STATE_USAGE_GUIDE) {
+            lv_obj_set_style_text_font(s_title_label, LV_FONT_DEFAULT, 0);
+            lv_obj_set_style_text_font(s_detail_label, LV_FONT_DEFAULT, 0);
+            lv_label_set_text_fmt(s_status_label, "%lu/%lu K7 next",
+                                  (unsigned long)(status->elapsed_sec + 1U),
+                                  (unsigned long)status->total_sec);
+            display_set_visible(s_status_label, true);
+            lv_obj_align(s_title_label, LV_ALIGN_TOP_MID, 0, 5);
+            lv_obj_align(s_detail_label, LV_ALIGN_CENTER, 0, 2);
+            lv_obj_align(s_status_label, LV_ALIGN_BOTTOM_MID, 0, -3);
+            display_set_visible(s_meter_bg, true);
+            lv_obj_set_pos(s_meter_bg, 2, 2);
+            lv_obj_set_size(s_meter_bg, DISPLAY_H_RES - 4, DISPLAY_V_RES - 4);
         } else if (status->state == DISPLAY_STATE_CLOCK) {
             time_t now;
             struct tm timeinfo;
@@ -1151,6 +1171,45 @@ void display_set_status(const char *title, const char *detail)
                      "%s", detail != NULL ? detail : "");
         }
         xSemaphoreGive(s_state_mutex);
+    }
+}
+
+void display_set_usage_guide_page(const char *title,
+                                  const char *detail,
+                                  uint8_t page,
+                                  uint8_t page_count)
+{
+    if (!s_initialized || title == NULL) {
+        return;
+    }
+
+    if (s_state_mutex == NULL) {
+        return;
+    }
+
+    if (xSemaphoreTake(s_state_mutex, portMAX_DELAY) == pdTRUE) {
+        s_status.state = DISPLAY_STATE_USAGE_GUIDE;
+        s_status.elapsed_sec = page;
+        s_status.total_sec = page_count;
+        s_status.state_start_tick = xTaskGetTickCount();
+        snprintf(s_status.status_title, sizeof(s_status.status_title),
+                 "%s", title);
+        snprintf(s_status.status_detail, sizeof(s_status.status_detail),
+                 "%s", detail != NULL ? detail : "");
+        xSemaphoreGive(s_state_mutex);
+    }
+}
+
+void display_set_usage_guide_mode(bool enable)
+{
+    if (!s_initialized) {
+        return;
+    }
+
+    if (enable) {
+        display_set_usage_guide_page("Guide", "K7 next page", 0, 1);
+    } else if (display_get_state() == DISPLAY_STATE_USAGE_GUIDE) {
+        display_set_idle();
     }
 }
 

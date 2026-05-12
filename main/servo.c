@@ -125,14 +125,14 @@ static const servo_motion_point_t s_orbit_points[] = {
 };
 
 static const servo_motion_point_t s_playback_points[] = {
-    {-8, 0},
-    {-5, +3},
+    {0, -8},
+    {0, -4},
+    {0, 0},
+    {0, +5},
+    {0, 0},
+    {0, -6},
+    {0, 0},
     {0, +4},
-    {+6, +2},
-    {+8, -1},
-    {+4, -3},
-    {-2, -2},
-    {-7, +1},
 };
 
 static const servo_motion_point_t s_listening_points[] = {
