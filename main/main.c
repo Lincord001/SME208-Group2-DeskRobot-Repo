@@ -7,11 +7,11 @@
  *   - 按键事件通过中转队列分发：
  *       K1 → 切换录音 开/停
  *       K2 → 切换播放 开/停
- *       K3 → 进入大耳狗显示模式
- *       K4 → 进入时钟模式
- *       K5 → 进入第二级低功耗
- *       K6 → 进入 Wi-Fi 配置
- *       K7 → 语音测试；长按进入第二级低功耗
+ *       K3 → 进入大耳狗显示模式；长按垂直舵机 -10°
+ *       K4 → 进入时钟模式；长按垂直舵机 +10°
+ *       K5 → 进入第二级低功耗；长按水平舵机 -10°
+ *       K6 → 进入 Wi-Fi 配置；长按水平舵机 +10°
+ *       K7 → 语音测试；长按进入使用说明界面
  *       K8 → 显示运行状态页；长按进入 Wi-Fi 配置
  *       所有事件同步转发给 LED 队列（保持按键闪灯效果）
  */
@@ -51,8 +51,10 @@ static const char *TAG = "MAIN";
 #define POWER_MIN_CPU_FREQ_MHZ 80
 #define CINNAMOROLL_MODE_KEY_ID 3
 #define CLOCK_MODE_KEY_ID 4
+#define USAGE_GUIDE_KEY_ID 7
 #define STATUS_MODE_KEY_ID 8
 #define DISPLAY_MODE_EXIT_GRACE_MS 700
+#define SERVO_KEY_STEP_DEG 10
 
 /* ── 中转队列 ────────────────────────────────────────────
  * main_key_task 从此队列读取按键事件，按 key_id 分发后
@@ -63,8 +65,41 @@ static audio_buffer_t s_audio_buf;
 static QueueHandle_t  s_main_key_queue;
 static TickType_t     s_cinnamoroll_mode_enter_tick;
 static TickType_t     s_clock_mode_enter_tick;
+static TickType_t     s_usage_guide_enter_tick;
 static TickType_t     s_status_mode_enter_tick;
+static uint8_t        s_usage_guide_page;
 static bool           s_status_page_active;
+
+typedef struct {
+    const char *title;
+    const char *detail;
+} usage_guide_page_t;
+
+static const usage_guide_page_t s_usage_guide_pages[] = {
+    {"K1 Record", "K1 again stop"},
+    {"K2 Playback", "K2 again stop"},
+    {"K3/K4 Modes", "Dog / Clock"},
+    {"K5/K6 Setup", "Sleep / WiFi"},
+    {"K7 Voice", "Hold K7 guide"},
+    {"K8 Status", "Hold K8 WiFi"},
+};
+
+static void main_show_usage_guide_page(bool reset)
+{
+    const uint8_t page_count = (uint8_t)(sizeof(s_usage_guide_pages) /
+                                         sizeof(s_usage_guide_pages[0]));
+
+    if (reset) {
+        s_usage_guide_page = 0;
+    } else {
+        s_usage_guide_page = (uint8_t)((s_usage_guide_page + 1U) % page_count);
+    }
+
+    display_set_usage_guide_page(s_usage_guide_pages[s_usage_guide_page].title,
+                                 s_usage_guide_pages[s_usage_guide_page].detail,
+                                 s_usage_guide_page,
+                                 page_count);
+}
 
 static void main_configure_power_management(void)
 {
@@ -108,6 +143,23 @@ static void main_key_task(void *arg)
         }
 
         power_manager_notify_activity();
+
+        if (display_get_state() == DISPLAY_STATE_USAGE_GUIDE) {
+            TickType_t held_ticks = xTaskGetTickCount() - s_usage_guide_enter_tick;
+            if (msg.key_id == USAGE_GUIDE_KEY_ID) {
+                if (held_ticks >= pdMS_TO_TICKS(DISPLAY_MODE_EXIT_GRACE_MS)) {
+                    main_show_usage_guide_page(false);
+                    ESP_LOGI(TAG, "Usage guide page switched by K%u", msg.key_id);
+                }
+            } else {
+                display_set_usage_guide_mode(false);
+                ESP_LOGI(TAG, "Usage guide exited by K%u", msg.key_id);
+            }
+            if (led_queue != NULL) {
+                xQueueSend(led_queue, &msg, 0);
+            }
+            continue;
+        }
 
         if (display_get_state() == DISPLAY_STATE_CLOCK) {
             TickType_t held_ticks = xTaskGetTickCount() - s_clock_mode_enter_tick;
@@ -229,14 +281,12 @@ static void main_key_task(void *arg)
             }
             break;
 
-        case 7: /* K7: voice test; long press enters stage-2 low power */
+        case 7: /* K7: voice test; long press enters usage guide */
             if (msg.event == LED_KEY_EVENT_LONG_PRESS_START) {
-                err = power_manager_enter_stage2();
-                if (err != ESP_OK) {
-                    ESP_LOGW(TAG, "K7: stage-2 low power rejected (%s)", esp_err_to_name(err));
-                } else {
-                    ESP_LOGI(TAG, "K7: stage-2 low power entered");
-                }
+                s_status_page_active = false;
+                s_usage_guide_enter_tick = xTaskGetTickCount();
+                main_show_usage_guide_page(true);
+                ESP_LOGI(TAG, "K7: usage guide entered");
             } else {
                 if (audio_state.recording_complete && audio_state.recorded_size > 0 &&
                     !audio_state.recording && !audio_state.playing) {
@@ -250,35 +300,75 @@ static void main_key_task(void *arg)
             }
             break;
 
-        case 3: /* K3：进入大耳狗显示模式 */
-            s_cinnamoroll_mode_enter_tick = xTaskGetTickCount();
-            display_set_cinnamoroll_mode(true);
-            ESP_LOGI(TAG, "K%u: Cinnamoroll mode entered", msg.key_id);
-            break;
-
-        case 4: /* K4：进入时钟模式 */
-            s_clock_mode_enter_tick = xTaskGetTickCount();
-            display_set_clock_mode(true);
-            ESP_LOGI(TAG, "K%u: clock mode entered", msg.key_id);
-            break;
-
-        case 5: /* K5：进入第二级低功耗 */
-            err = power_manager_enter_stage2();
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "K%u: stage-2 low power rejected (%s)",
-                         msg.key_id, esp_err_to_name(err));
+        case 3: /* K3: short press enters dog mode; long press moves vertical -10 deg */
+            if (msg.event == LED_KEY_EVENT_LONG_PRESS_START) {
+                err = servo_move_relative(SERVO_AXIS_VERTICAL, -SERVO_KEY_STEP_DEG);
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "K%u: servo command rejected (%s)",
+                             msg.key_id, esp_err_to_name(err));
+                } else {
+                    ESP_LOGI(TAG, "K%u: vertical servo -%d deg", msg.key_id, SERVO_KEY_STEP_DEG);
+                }
             } else {
-                ESP_LOGI(TAG, "K%u: stage-2 low power entered", msg.key_id);
+                s_cinnamoroll_mode_enter_tick = xTaskGetTickCount();
+                display_set_cinnamoroll_mode(true);
+                ESP_LOGI(TAG, "K%u: Cinnamoroll mode entered", msg.key_id);
             }
             break;
 
-        case 6: /* K6：进入 Wi-Fi 配置 */
-            err = wifi_network_start_config_mode(false);
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "K%u: WiFi config mode rejected (%s)",
-                         msg.key_id, esp_err_to_name(err));
+        case 4: /* K4: short press enters clock mode; long press moves vertical +10 deg */
+            if (msg.event == LED_KEY_EVENT_LONG_PRESS_START) {
+                err = servo_move_relative(SERVO_AXIS_VERTICAL, SERVO_KEY_STEP_DEG);
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "K%u: servo command rejected (%s)",
+                             msg.key_id, esp_err_to_name(err));
+                } else {
+                    ESP_LOGI(TAG, "K%u: vertical servo +%d deg", msg.key_id, SERVO_KEY_STEP_DEG);
+                }
             } else {
-                ESP_LOGI(TAG, "K%u: WiFi config mode started", msg.key_id);
+                s_clock_mode_enter_tick = xTaskGetTickCount();
+                display_set_clock_mode(true);
+                ESP_LOGI(TAG, "K%u: clock mode entered", msg.key_id);
+            }
+            break;
+
+        case 5: /* K5: short press enters low power; long press moves horizontal -10 deg */
+            if (msg.event == LED_KEY_EVENT_LONG_PRESS_START) {
+                err = servo_move_relative(SERVO_AXIS_HORIZONTAL, -SERVO_KEY_STEP_DEG);
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "K%u: servo command rejected (%s)",
+                             msg.key_id, esp_err_to_name(err));
+                } else {
+                    ESP_LOGI(TAG, "K%u: horizontal servo -%d deg", msg.key_id, SERVO_KEY_STEP_DEG);
+                }
+            } else {
+                err = power_manager_enter_stage2();
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "K%u: stage-2 low power rejected (%s)",
+                             msg.key_id, esp_err_to_name(err));
+                } else {
+                    ESP_LOGI(TAG, "K%u: stage-2 low power entered", msg.key_id);
+                }
+            }
+            break;
+
+        case 6: /* K6: short press enters WiFi config; long press moves horizontal +10 deg */
+            if (msg.event == LED_KEY_EVENT_LONG_PRESS_START) {
+                err = servo_move_relative(SERVO_AXIS_HORIZONTAL, SERVO_KEY_STEP_DEG);
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "K%u: servo command rejected (%s)",
+                             msg.key_id, esp_err_to_name(err));
+                } else {
+                    ESP_LOGI(TAG, "K%u: horizontal servo +%d deg", msg.key_id, SERVO_KEY_STEP_DEG);
+                }
+            } else {
+                err = wifi_network_start_config_mode(false);
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "K%u: WiFi config mode rejected (%s)",
+                             msg.key_id, esp_err_to_name(err));
+                } else {
+                    ESP_LOGI(TAG, "K%u: WiFi config mode started", msg.key_id);
+                }
             }
             break;
 
@@ -398,5 +488,5 @@ void app_main(void)
     }
 
     ESP_LOGI(TAG,
-             "System ready  |  K1=录音开/停  K2=播放开/停  K3=大耳狗  K4=时钟模式  K5=二级低功耗  K6=WiFi配置  K7=语音测试  K7长按=二级低功耗  K8=状态页  K8长按=WiFi配置");
+             "System ready  |  K1=录音开/停  K2=播放开/停  K3=大耳狗/长按垂直-  K4=时钟/长按垂直+  K5=二级低功耗/长按水平-  K6=WiFi配置/长按水平+  K7=语音测试  K7长按=使用说明  K8=状态页  K8长按=WiFi配置");
 }
