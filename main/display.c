@@ -20,6 +20,8 @@
 #include <freertos/task.h>
 #include <lvgl.h>
 
+#include "cinnamoroll_bitmap.h"
+
 #define DISPLAY_I2C_SDA_PIN      GPIO_NUM_3
 #define DISPLAY_I2C_SCL_PIN      GPIO_NUM_8
 #define DISPLAY_I2C_PORT         I2C_NUM_0
@@ -57,6 +59,25 @@ typedef struct {
     char status_detail[32];
 } display_status_t;
 
+typedef enum {
+    DISPLAY_CINNA_EAR_L = 0,
+    DISPLAY_CINNA_EAR_R,
+    DISPLAY_CINNA_HEAD,
+    DISPLAY_CINNA_BODY,
+    DISPLAY_CINNA_EYE_L,
+    DISPLAY_CINNA_EYE_R,
+    DISPLAY_CINNA_FOOT_L,
+    DISPLAY_CINNA_FOOT_R,
+    DISPLAY_CINNA_PAW_L,
+    DISPLAY_CINNA_PAW_R,
+    DISPLAY_CINNA_TOP_L,
+    DISPLAY_CINNA_TOP_R,
+    DISPLAY_CINNA_HEART_L,
+    DISPLAY_CINNA_HEART_R,
+    DISPLAY_CINNA_HEART_B,
+    DISPLAY_CINNA_PART_COUNT,
+} display_cinnamoroll_part_t;
+
 static SemaphoreHandle_t s_state_mutex;
 static TaskHandle_t s_task_handle;
 static bool s_initialized;
@@ -76,6 +97,8 @@ static lv_obj_t *s_meter_fill;
 static lv_obj_t *s_eye;
 static lv_obj_t *s_eye_glint;
 static lv_obj_t *s_dots[3];
+static lv_obj_t *s_cinna_image;
+static lv_obj_t *s_cinna_parts[DISPLAY_CINNA_PART_COUNT];
 static uint8_t s_i2c_hw_addr = DISPLAY_I2C_HW_ADDR;
 
 static const audio_buffer_t *s_audio_buf;
@@ -250,7 +273,7 @@ static void display_format_text(const display_status_t *status,
         break;
 
     case DISPLAY_STATE_WIFI:
-        title[0] = '\0';
+        snprintf(title, title_size, "WiFi");
         snprintf(detail, detail_size, "%s",
                  status->wifi_status[0] != '\0' ? status->wifi_status : "init");
         break;
@@ -279,6 +302,11 @@ static void display_format_text(const display_status_t *status,
         }
         break;
     }
+
+    case DISPLAY_STATE_CINNAMOROLL:
+        title[0] = '\0';
+        detail[0] = '\0';
+        break;
 
     case DISPLAY_STATE_ERROR:
         snprintf(title, title_size, "Error");
@@ -335,8 +363,12 @@ static void display_hide_motion_objects(void)
     display_set_visible(s_meter_fill, false);
     display_set_visible(s_eye, false);
     display_set_visible(s_eye_glint, false);
+    display_set_visible(s_cinna_image, false);
     for (size_t i = 0; i < 3; ++i) {
         display_set_visible(s_dots[i], false);
+    }
+    for (size_t i = 0; i < DISPLAY_CINNA_PART_COUNT; ++i) {
+        display_set_visible(s_cinna_parts[i], false);
     }
 }
 
@@ -427,14 +459,50 @@ static void display_render_status(const char *title,
             lv_obj_align(s_status_label, LV_ALIGN_CENTER, 0, -14);
             display_set_meter(fill);
         } else if (status->state == DISPLAY_STATE_WIFI) {
-            lv_label_set_text(s_status_label, "WIFI");
-            display_set_visible(s_status_label, true);
-            lv_obj_align(s_status_label, LV_ALIGN_CENTER, 0, -16);
-            for (size_t i = 0; i < 3; ++i) {
-                bool active = ((frame / 2U) % 4U) > i;
-                display_set_visible(s_dots[i], true);
-                lv_obj_set_pos(s_dots[i], 50 + (int)i * 12, 35 - (int)i * 4);
-                lv_obj_set_size(s_dots[i], active ? 8 : 5, active ? 8 : 5);
+            lv_obj_set_style_text_font(s_title_label, &lv_font_montserrat_14, 0);
+            lv_obj_set_style_text_font(s_detail_label, &lv_font_montserrat_14, 0);
+            lv_label_set_text(s_status_label, "");
+            display_set_visible(s_status_label, false);
+            lv_obj_align(s_title_label, LV_ALIGN_CENTER, 0, -10);
+            lv_obj_align(s_detail_label, LV_ALIGN_CENTER, 0, 10);
+            if (strcmp(status->wifi_status, "connected") == 0) {
+                lv_obj_set_style_text_font(s_status_label, LV_FONT_DEFAULT, 0);
+                lv_label_set_text(s_status_label, "OK");
+                display_set_visible(s_status_label, true);
+                lv_obj_align(s_status_label, LV_ALIGN_CENTER, 0, -26);
+
+                display_set_visible(s_meter_bg, true);
+                display_set_visible(s_meter_fill, true);
+                lv_obj_set_pos(s_meter_bg, 96, 8);
+                lv_obj_set_size(s_meter_bg, 18, 18);
+                lv_obj_set_pos(s_meter_fill, 101, 13);
+                lv_obj_set_size(s_meter_fill, 8, 8);
+            } else if (strcmp(status->wifi_status, "config mode") == 0) {
+                display_set_visible(s_meter_bg, true);
+                lv_obj_set_pos(s_meter_bg, 8, 8);
+                lv_obj_set_size(s_meter_bg, DISPLAY_H_RES - 16, DISPLAY_V_RES - 16);
+
+                for (size_t i = 0; i < 3; ++i) {
+                    display_set_visible(s_dots[i], true);
+                    lv_obj_set_pos(s_dots[i], 18 + (int)i * 42, 48);
+                    lv_obj_set_size(s_dots[i], 5, 5);
+                }
+            } else {
+                static const int8_t spinner_pos[4][3][2] = {
+                    {{62, 6}, {86, 30}, {62, 54}},
+                    {{86, 30}, {62, 54}, {38, 30}},
+                    {{62, 54}, {38, 30}, {62, 6}},
+                    {{38, 30}, {62, 6}, {86, 30}},
+                };
+                uint32_t phase = (frame / 2U) % 4U;
+                for (size_t i = 0; i < 3; ++i) {
+                    int size = (i == 0) ? 8 : 5;
+                    display_set_visible(s_dots[i], true);
+                    lv_obj_set_pos(s_dots[i],
+                                   spinner_pos[phase][i][0],
+                                   spinner_pos[phase][i][1]);
+                    lv_obj_set_size(s_dots[i], size, size);
+                }
             }
         } else if (status->state == DISPLAY_STATE_STATUS) {
             bool complete = strcmp(status->status_title, "Recorded") == 0 ||
@@ -445,22 +513,25 @@ static void display_render_status(const char *title,
                                strncmp(status->status_title, "ASR", 3) == 0 ||
                                strncmp(status->status_title, "LLM", 3) == 0 ||
                                strncmp(status->status_title, "TTS", 3) == 0;
-            lv_label_set_text(s_status_label, complete ? "DONE" : (system_page ? "INFO" : "WORK"));
-            display_set_visible(s_status_label, true);
-            lv_obj_align(s_status_label, LV_ALIGN_CENTER, 0, -14);
-            if (complete) {
-                display_set_meter(100);
-            } else if (system_page) {
+            if (system_page) {
+                lv_obj_set_style_text_font(s_title_label, LV_FONT_DEFAULT, 0);
+                lv_obj_set_style_text_font(s_detail_label, LV_FONT_DEFAULT, 0);
+                lv_label_set_text(s_status_label, "");
+                display_set_visible(s_status_label, false);
+                lv_obj_align(s_title_label, LV_ALIGN_CENTER, 0, -8);
+                lv_obj_align(s_detail_label, LV_ALIGN_CENTER, 0, 8);
                 display_set_visible(s_meter_bg, true);
-                display_set_visible(s_meter_fill, false);
-                lv_obj_set_pos(s_meter_bg, 18, 42);
-                lv_obj_set_size(s_meter_bg, 92, 8);
-                for (size_t i = 0; i < 3; ++i) {
-                    display_set_visible(s_dots[i], true);
-                    lv_obj_set_pos(s_dots[i], 43 + (int)i * 18, 32);
-                    lv_obj_set_size(s_dots[i], 8, 8);
-                }
+                lv_obj_set_pos(s_meter_bg, 2, 2);
+                lv_obj_set_size(s_meter_bg, DISPLAY_H_RES - 4, DISPLAY_V_RES - 4);
+            } else if (complete) {
+                lv_label_set_text(s_status_label, "DONE");
+                display_set_visible(s_status_label, true);
+                lv_obj_align(s_status_label, LV_ALIGN_CENTER, 0, -14);
+                display_set_meter(100);
             } else {
+                lv_label_set_text(s_status_label, "WORK");
+                display_set_visible(s_status_label, true);
+                lv_obj_align(s_status_label, LV_ALIGN_CENTER, 0, -14);
                 for (size_t i = 0; i < 3; ++i) {
                     bool active = ((frame / 2U) % 3U) == i;
                     display_set_visible(s_dots[i], true);
@@ -495,6 +566,14 @@ static void display_render_status(const char *title,
             lv_obj_set_size(s_meter_bg, 112, 30);
             lv_obj_set_pos(s_meter_fill, 14, 46);
             lv_obj_set_size(s_meter_fill, (100 * second_progress) / 100, 3);
+        } else if (status->state == DISPLAY_STATE_CINNAMOROLL) {
+            lv_label_set_text(s_title_label, "");
+            lv_label_set_text(s_detail_label, "");
+            lv_label_set_text(s_status_label, "");
+            display_set_visible(s_status_label, false);
+            display_set_visible(s_cinna_image, true);
+            lv_obj_set_pos(s_cinna_image, 0, 0);
+            lv_obj_move_foreground(s_cinna_image);
         } else if (status->state == DISPLAY_STATE_ERROR) {
             lv_label_set_text(s_status_label, "!");
             display_set_visible(s_status_label, true);
@@ -598,6 +677,7 @@ static esp_err_t display_create_lvgl_labels(void)
     s_title_label = lv_label_create(screen);
     s_detail_label = lv_label_create(screen);
     s_status_label = lv_label_create(screen);
+    s_cinna_image = lv_image_create(screen);
     s_meter_bg = lv_obj_create(screen);
     s_meter_fill = lv_obj_create(screen);
     s_eye = lv_obj_create(screen);
@@ -605,12 +685,22 @@ static esp_err_t display_create_lvgl_labels(void)
     for (size_t i = 0; i < 3; ++i) {
         s_dots[i] = lv_obj_create(screen);
     }
+    for (size_t i = 0; i < DISPLAY_CINNA_PART_COUNT; ++i) {
+        s_cinna_parts[i] = lv_obj_create(screen);
+    }
 
     if (s_title_label == NULL || s_detail_label == NULL || s_status_label == NULL ||
+        s_cinna_image == NULL ||
         s_meter_bg == NULL || s_meter_fill == NULL || s_eye == NULL || s_eye_glint == NULL ||
         s_dots[0] == NULL || s_dots[1] == NULL || s_dots[2] == NULL) {
         lvgl_port_unlock();
         return ESP_ERR_NO_MEM;
+    }
+    for (size_t i = 0; i < DISPLAY_CINNA_PART_COUNT; ++i) {
+        if (s_cinna_parts[i] == NULL) {
+            lvgl_port_unlock();
+            return ESP_ERR_NO_MEM;
+        }
     }
 
     lv_obj_set_width(s_title_label, DISPLAY_H_RES);
@@ -623,12 +713,25 @@ static esp_err_t display_create_lvgl_labels(void)
     lv_obj_set_style_text_align(s_detail_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_align(s_status_label, LV_TEXT_ALIGN_CENTER, 0);
 
+    lv_image_set_src(s_cinna_image, &s_cinnamoroll_image_dsc);
+    lv_image_set_antialias(s_cinna_image, false);
+    lv_obj_set_pos(s_cinna_image, 0, 0);
+    lv_obj_set_size(s_cinna_image, DISPLAY_H_RES, DISPLAY_V_RES);
+
     display_set_box_style(s_meter_bg, false, 3);
     display_set_box_style(s_meter_fill, true, 2);
     display_set_box_style(s_eye, false, LV_RADIUS_CIRCLE);
     display_set_box_style(s_eye_glint, true, LV_RADIUS_CIRCLE);
     for (size_t i = 0; i < 3; ++i) {
         display_set_box_style(s_dots[i], true, LV_RADIUS_CIRCLE);
+    }
+    for (size_t i = 0; i < DISPLAY_CINNA_PART_COUNT; ++i) {
+        bool filled = i == DISPLAY_CINNA_EYE_L ||
+                      i == DISPLAY_CINNA_EYE_R ||
+                      i == DISPLAY_CINNA_HEART_L ||
+                      i == DISPLAY_CINNA_HEART_R ||
+                      i == DISPLAY_CINNA_HEART_B;
+        display_set_box_style(s_cinna_parts[i], filled, LV_RADIUS_CIRCLE);
     }
 
     lv_label_set_text(s_title_label, "Ready");
@@ -894,6 +997,19 @@ void display_set_clock_mode(bool enable)
     if (enable) {
         display_update_state(DISPLAY_STATE_CLOCK, 0, 0);
     } else if (display_get_state() == DISPLAY_STATE_CLOCK) {
+        display_set_idle();
+    }
+}
+
+void display_set_cinnamoroll_mode(bool enable)
+{
+    if (!s_initialized) {
+        return;
+    }
+
+    if (enable) {
+        display_update_state(DISPLAY_STATE_CINNAMOROLL, 0, 0);
+    } else if (display_get_state() == DISPLAY_STATE_CINNAMOROLL) {
         display_set_idle();
     }
 }

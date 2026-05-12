@@ -16,7 +16,7 @@
 #endif
 
 #ifndef DASHSCOPE_LLM_MODEL
-#define DASHSCOPE_LLM_MODEL "qwen3.6-max-preview"
+#define DASHSCOPE_LLM_MODEL "qwen3.6-flash-2026-04-16"
 #endif
 
 #ifndef DASHSCOPE_ASR_URL

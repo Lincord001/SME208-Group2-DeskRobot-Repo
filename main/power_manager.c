@@ -93,6 +93,10 @@ static const char *power_manager_display_state_to_string(display_state_t state)
         return "wifi";
     case DISPLAY_STATE_STATUS:
         return "status";
+    case DISPLAY_STATE_CLOCK:
+        return "clock";
+    case DISPLAY_STATE_CINNAMOROLL:
+        return "cinnamoroll";
     case DISPLAY_STATE_ERROR:
         return "error";
     default:
