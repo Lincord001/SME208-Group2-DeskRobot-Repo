@@ -7,6 +7,7 @@
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include <freertos/timers.h>
 #include <iot_button.h>
 #include <button_gpio.h>
 
@@ -30,6 +31,9 @@
 typedef struct {
     uint8_t key_id;
     QueueHandle_t event_queue;
+    TimerHandle_t long_press_timer;
+    bool is_pressed;
+    bool long_press_sent;
 } key_ctx_t;
 
 static const char *TAG = "KEY";
@@ -68,19 +72,47 @@ static void key_send_event(void *button_handle, void *usr_data, led_key_event_t 
     }
 }
 
+static void key_long_press_timer_cb(TimerHandle_t timer)
+{
+    key_ctx_t *ctx = (key_ctx_t *)pvTimerGetTimerID(timer);
+    if (ctx == NULL || !ctx->is_pressed || ctx->long_press_sent) {
+        return;
+    }
+
+    ctx->long_press_sent = true;
+    key_send_event(NULL, ctx, LED_KEY_EVENT_LONG_PRESS_START);
+}
+
 static void key_press_down_cb(void *button_handle, void *usr_data)
 {
-    key_send_event(button_handle, usr_data, LED_KEY_EVENT_PRESS_DOWN);
+    key_ctx_t *ctx = (key_ctx_t *)usr_data;
+    if (ctx == NULL) {
+        return;
+    }
+
+    if (ctx->long_press_timer == NULL) {
+        key_send_event(button_handle, usr_data, LED_KEY_EVENT_PRESS_DOWN);
+        return;
+    }
+
+    ctx->is_pressed = true;
+    ctx->long_press_sent = false;
+    xTimerStop(ctx->long_press_timer, 0);
+    xTimerStart(ctx->long_press_timer, 0);
 }
 
-static void key_single_click_cb(void *button_handle, void *usr_data)
+static void key_press_up_cb(void *button_handle, void *usr_data)
 {
-    key_send_event(button_handle, usr_data, LED_KEY_EVENT_SINGLE_CLICK);
-}
+    key_ctx_t *ctx = (key_ctx_t *)usr_data;
+    if (ctx == NULL || ctx->long_press_timer == NULL) {
+        return;
+    }
 
-static void key_long_press_start_cb(void *button_handle, void *usr_data)
-{
-    key_send_event(button_handle, usr_data, LED_KEY_EVENT_LONG_PRESS_START);
+    ctx->is_pressed = false;
+    xTimerStop(ctx->long_press_timer, 0);
+    if (!ctx->long_press_sent) {
+        key_send_event(button_handle, usr_data, LED_KEY_EVENT_SINGLE_CLICK);
+    }
 }
 
 static void key_cleanup_created_buttons(size_t count)
@@ -131,19 +163,31 @@ esp_err_t key_init(QueueHandle_t led_event_queue)
 
         if (s_key_ctx[i].key_id == KEY_LOW_POWER_STAGE2_ID ||
             s_key_ctx[i].key_id == KEY_WIFI_CONFIG_ID) {
-            err = iot_button_register_cb(s_button_handles[i], BUTTON_SINGLE_CLICK, NULL,
-                                         key_single_click_cb, &s_key_ctx[i]);
+            s_key_ctx[i].long_press_timer = xTimerCreate("key_long",
+                                                         pdMS_TO_TICKS(KEY_LONG_PRESS_MS),
+                                                         pdFALSE,
+                                                         &s_key_ctx[i],
+                                                         key_long_press_timer_cb);
+            if (s_key_ctx[i].long_press_timer == NULL) {
+                ESP_LOGE(TAG, "Failed to create long-press timer for key %u",
+                         (unsigned)(i + 1));
+                key_cleanup_created_buttons(i + 1);
+                return ESP_ERR_NO_MEM;
+            }
+
+            err = iot_button_register_cb(s_button_handles[i], BUTTON_PRESS_DOWN, NULL,
+                                         key_press_down_cb, &s_key_ctx[i]);
             if (err != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to register single-click callback for key %u: %s",
+                ESP_LOGE(TAG, "Failed to register press-down callback for key %u: %s",
                          (unsigned)(i + 1), esp_err_to_name(err));
                 key_cleanup_created_buttons(i + 1);
                 return err;
             }
 
-            err = iot_button_register_cb(s_button_handles[i], BUTTON_LONG_PRESS_START, NULL,
-                                         key_long_press_start_cb, &s_key_ctx[i]);
+            err = iot_button_register_cb(s_button_handles[i], BUTTON_PRESS_UP, NULL,
+                                         key_press_up_cb, &s_key_ctx[i]);
             if (err != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to register long-press callback for key %u: %s",
+                ESP_LOGE(TAG, "Failed to register press-up callback for key %u: %s",
                          (unsigned)(i + 1), esp_err_to_name(err));
                 key_cleanup_created_buttons(i + 1);
                 return err;

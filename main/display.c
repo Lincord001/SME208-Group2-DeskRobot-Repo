@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include <driver/gpio.h>
 #include <driver/i2c_master.h>
@@ -261,6 +262,24 @@ static void display_format_text(const display_status_t *status,
                  status->status_detail[0] != '\0' ? status->status_detail : "");
         break;
 
+    case DISPLAY_STATE_CLOCK: {
+        time_t now;
+        struct tm timeinfo;
+
+        time(&now);
+        localtime_r(&now, &timeinfo);
+        if (timeinfo.tm_year < (2023 - 1900)) {
+            snprintf(title, title_size, "--:--:--");
+            snprintf(detail, detail_size, "Syncing time");
+        } else {
+            snprintf(title, title_size, "%02d:%02d:%02d",
+                     timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+            snprintf(detail, detail_size, "%04d-%02d-%02d",
+                     timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday);
+        }
+        break;
+    }
+
     case DISPLAY_STATE_ERROR:
         snprintf(title, title_size, "Error");
         snprintf(detail, detail_size, "Check logs");
@@ -343,6 +362,9 @@ static void display_render_status(const char *title,
     }
 
     if (lvgl_port_lock(0)) {
+        lv_obj_set_style_text_font(s_title_label, LV_FONT_DEFAULT, 0);
+        lv_obj_set_style_text_font(s_detail_label, LV_FONT_DEFAULT, 0);
+        lv_obj_set_style_text_font(s_status_label, LV_FONT_DEFAULT, 0);
         lv_label_set_text(s_title_label, title);
         lv_label_set_text(s_detail_label, detail);
         lv_obj_align(s_title_label, LV_ALIGN_TOP_MID, 0, 3);
@@ -446,6 +468,33 @@ static void display_render_status(const char *title,
                     lv_obj_set_size(s_dots[i], active ? 8 : 5, active ? 8 : 5);
                 }
             }
+        } else if (status->state == DISPLAY_STATE_CLOCK) {
+            time_t now;
+            struct tm timeinfo;
+            uint8_t second_progress = 0;
+
+            time(&now);
+            localtime_r(&now, &timeinfo);
+            if (timeinfo.tm_year >= (2023 - 1900)) {
+                second_progress = (uint8_t)((timeinfo.tm_sec * 100U) / 59U);
+            } else {
+                second_progress = display_triangle_wave(frame, 24, 100);
+            }
+
+            lv_obj_set_style_text_font(s_title_label, &lv_font_montserrat_14, 0);
+            lv_obj_align(s_title_label, LV_ALIGN_CENTER, 0, 4);
+            lv_obj_align(s_detail_label, LV_ALIGN_BOTTOM_MID, 0, -2);
+
+            lv_label_set_text(s_status_label, "CLOCK");
+            display_set_visible(s_status_label, true);
+            lv_obj_align(s_status_label, LV_ALIGN_TOP_MID, 0, 1);
+
+            display_set_visible(s_meter_bg, true);
+            display_set_visible(s_meter_fill, true);
+            lv_obj_set_pos(s_meter_bg, 8, 20);
+            lv_obj_set_size(s_meter_bg, 112, 30);
+            lv_obj_set_pos(s_meter_fill, 14, 46);
+            lv_obj_set_size(s_meter_fill, (100 * second_progress) / 100, 3);
         } else if (status->state == DISPLAY_STATE_ERROR) {
             lv_label_set_text(s_status_label, "!");
             display_set_visible(s_status_label, true);
@@ -833,6 +882,19 @@ void display_set_wifi_status(const char *status)
                      "%s", status);
         }
         xSemaphoreGive(s_state_mutex);
+    }
+}
+
+void display_set_clock_mode(bool enable)
+{
+    if (!s_initialized) {
+        return;
+    }
+
+    if (enable) {
+        display_update_state(DISPLAY_STATE_CLOCK, 0, 0);
+    } else if (display_get_state() == DISPLAY_STATE_CLOCK) {
+        display_set_idle();
     }
 }
 

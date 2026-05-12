@@ -1,12 +1,15 @@
 #include "wifi_network.h"
 
+#include <cstdlib>
 #include <cstdio>
 #include <string>
+#include <ctime>
 
 #include <esp_check.h>
 #include <esp_event.h>
 #include <esp_log.h>
 #include <esp_netif.h>
+#include <esp_sntp.h>
 #include <esp_wifi.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -19,16 +22,36 @@
 
 static const char *TAG = "wifi_network";
 static constexpr TickType_t INITIAL_CONNECT_TIMEOUT = pdMS_TO_TICKS(45000);
+static constexpr const char *CLOCK_TIMEZONE = "CST-8";
+static constexpr const char *CLOCK_SNTP_SERVER = "pool.ntp.org";
 
 static bool s_initialized;
 static bool s_started;
 static bool s_started_with_saved_config;
 static bool s_power_save_enabled;
+static bool s_sntp_started;
 static volatile bool s_connected;
 static portMUX_TYPE s_status_lock = portMUX_INITIALIZER_UNLOCKED;
 static char s_status[32] = "WiFi init";
 
 static void wifi_network_start_station_task(void *arg);
+
+static void wifi_network_start_time_sync(void)
+{
+    setenv("TZ", CLOCK_TIMEZONE, 1);
+    tzset();
+
+    if (s_sntp_started) {
+        return;
+    }
+
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, CLOCK_SNTP_SERVER);
+    esp_sntp_init();
+    s_sntp_started = true;
+
+    ESP_LOGI(TAG, "SNTP clock sync started: %s", CLOCK_SNTP_SERVER);
+}
 
 static void wifi_network_set_status(const char *status)
 {
@@ -77,6 +100,7 @@ static void wifi_network_event_handler(WifiEvent event, const std::string& data)
         s_connected = true;
         auto& wifi = WifiManager::GetInstance();
         wifi_network_set_status("connected");
+        wifi_network_start_time_sync();
         ESP_LOGI(TAG, "WiFi connected: SSID=%s IP=%s RSSI=%d",
                  data.c_str(),
                  wifi.GetIpAddress().c_str(),

@@ -7,6 +7,9 @@
  *   - 按键事件通过中转队列分发：
  *       K1 → 切换录音 开/停
  *       K2 → 切换播放 开/停
+ *       K4 → 进入时钟模式
+ *       K5 → 进入第二级低功耗
+ *       K6 → 进入 Wi-Fi 配置
  *       K7 → 语音测试；长按进入第二级低功耗
  *       K8 → 显示运行状态页；长按进入 Wi-Fi 配置
  *       所有事件同步转发给 LED 队列（保持按键闪灯效果）
@@ -45,6 +48,8 @@ static const char *TAG = "MAIN";
 #define AUDIO_MAX_SECS     20
 #define AUDIO_BUF_BYTES    (AUDIO_SAMPLE_RATE * sizeof(int16_t) * AUDIO_MAX_SECS)
 #define POWER_MIN_CPU_FREQ_MHZ 80
+#define CLOCK_MODE_KEY_ID 4
+#define CLOCK_EXIT_GRACE_MS 700
 
 /* ── 中转队列 ────────────────────────────────────────────
  * main_key_task 从此队列读取按键事件，按 key_id 分发后
@@ -53,6 +58,7 @@ static const char *TAG = "MAIN";
 
 static audio_buffer_t s_audio_buf;
 static QueueHandle_t  s_main_key_queue;
+static TickType_t     s_clock_mode_enter_tick;
 
 static void main_configure_power_management(void)
 {
@@ -89,7 +95,26 @@ static void main_key_task(void *arg)
             continue;
         }
 
+        if (power_manager_is_low_power()) {
+            power_manager_notify_activity();
+            ESP_LOGI(TAG, "K%u: wake from low power", msg.key_id);
+            continue;
+        }
+
         power_manager_notify_activity();
+
+        if (display_get_state() == DISPLAY_STATE_CLOCK) {
+            TickType_t held_ticks = xTaskGetTickCount() - s_clock_mode_enter_tick;
+            if (!(msg.key_id == CLOCK_MODE_KEY_ID &&
+                  held_ticks < pdMS_TO_TICKS(CLOCK_EXIT_GRACE_MS))) {
+                display_set_clock_mode(false);
+                ESP_LOGI(TAG, "Clock mode exited by K%u", msg.key_id);
+            }
+            if (led_queue != NULL) {
+                xQueueSend(led_queue, &msg, 0);
+            }
+            continue;
+        }
 
         /* ── 音频控制逻辑（不阻塞，仅设置标志位）─────── */
         audio_buffer_state_t audio_state;
@@ -187,27 +212,29 @@ static void main_key_task(void *arg)
             }
             break;
 
-        case 4: /* K4：垂直舵机 +10° */
-            err = servo_move_relative(SERVO_AXIS_VERTICAL, +10);
+        case 4: /* K4：进入时钟模式 */
+            s_clock_mode_enter_tick = xTaskGetTickCount();
+            display_set_clock_mode(true);
+            ESP_LOGI(TAG, "K%u: clock mode entered", msg.key_id);
+            break;
+
+        case 5: /* K5：进入第二级低功耗 */
+            err = power_manager_enter_stage2();
             if (err != ESP_OK) {
-                ESP_LOGW(TAG, "K%u: servo command rejected (%s)",
+                ESP_LOGW(TAG, "K%u: stage-2 low power rejected (%s)",
                          msg.key_id, esp_err_to_name(err));
+            } else {
+                ESP_LOGI(TAG, "K%u: stage-2 low power entered", msg.key_id);
             }
             break;
 
-        case 5: /* K5：水平舵机 -10° */
-            err = servo_move_relative(SERVO_AXIS_HORIZONTAL, -10);
+        case 6: /* K6：进入 Wi-Fi 配置 */
+            err = wifi_network_start_config_mode(false);
             if (err != ESP_OK) {
-                ESP_LOGW(TAG, "K%u: servo command rejected (%s)",
+                ESP_LOGW(TAG, "K%u: WiFi config mode rejected (%s)",
                          msg.key_id, esp_err_to_name(err));
-            }
-            break;
-
-        case 6: /* K6：水平舵机 +10° */
-            err = servo_move_relative(SERVO_AXIS_HORIZONTAL, +10);
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "K%u: servo command rejected (%s)",
-                         msg.key_id, esp_err_to_name(err));
+            } else {
+                ESP_LOGI(TAG, "K%u: WiFi config mode started", msg.key_id);
             }
             break;
 
@@ -327,5 +354,5 @@ void app_main(void)
     }
 
     ESP_LOGI(TAG,
-             "System ready  |  K1=录音开/停  K2=播放开/停  K3/K4=垂直-/+  K5/K6=水平-/+  K7=语音测试  K7长按=二级低功耗  K8=状态页  K8长按=WiFi配置");
+             "System ready  |  K1=录音开/停  K2=播放开/停  K3=垂直-  K4=时钟模式  K5=二级低功耗  K6=WiFi配置  K7=语音测试  K7长按=二级低功耗  K8=状态页  K8长按=WiFi配置");
 }
