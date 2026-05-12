@@ -7,6 +7,7 @@
  *   - 按键事件通过中转队列分发：
  *       K1 → 切换录音 开/停
  *       K2 → 切换播放 开/停
+ *       K7 → 语音测试；长按进入第二级低功耗
  *       K8 → 显示运行状态页；长按进入 Wi-Fi 配置
  *       所有事件同步转发给 LED 队列（保持按键闪灯效果）
  */
@@ -157,15 +158,24 @@ static void main_key_task(void *arg)
             }
             break;
 
-        case 7: /* K7: full ASR->LLM->TTS test, or TTS smoke test if no audio */
-            if (audio_state.recording_complete && audio_state.recorded_size > 0 &&
-                !audio_state.recording && !audio_state.playing) {
-                err = voice_assistant_start_full_test(&s_audio_buf, AUDIO_SAMPLE_RATE);
+        case 7: /* K7: voice test; long press enters stage-2 low power */
+            if (msg.event == LED_KEY_EVENT_LONG_PRESS_START) {
+                err = power_manager_enter_stage2();
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "K7: stage-2 low power rejected (%s)", esp_err_to_name(err));
+                } else {
+                    ESP_LOGI(TAG, "K7: stage-2 low power entered");
+                }
             } else {
-                err = voice_assistant_start_tts_test(&s_audio_buf);
-            }
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "K7: voice test rejected (%s)", esp_err_to_name(err));
+                if (audio_state.recording_complete && audio_state.recorded_size > 0 &&
+                    !audio_state.recording && !audio_state.playing) {
+                    err = voice_assistant_start_full_test(&s_audio_buf, AUDIO_SAMPLE_RATE);
+                } else {
+                    err = voice_assistant_start_tts_test(&s_audio_buf);
+                }
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "K7: voice test rejected (%s)", esp_err_to_name(err));
+                }
             }
             break;
 
@@ -317,5 +327,5 @@ void app_main(void)
     }
 
     ESP_LOGI(TAG,
-             "System ready  |  K1=录音开/停  K2=播放开/停  K3/K4=垂直-/+  K5/K6=水平-/+  K8=状态页  K8长按=WiFi配置");
+             "System ready  |  K1=录音开/停  K2=播放开/停  K3/K4=垂直-/+  K5/K6=水平-/+  K7=语音测试  K7长按=二级低功耗  K8=状态页  K8长按=WiFi配置");
 }

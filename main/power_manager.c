@@ -222,7 +222,8 @@ static void power_manager_task(void *arg)
             }
         } else if (idle_ticks >= pdMS_TO_TICKS(POWER_STAGE2_IDLE_MS)) {
             power_manager_set_stage(POWER_STAGE_DISPLAY_OFF);
-        } else if (idle_ticks >= pdMS_TO_TICKS(POWER_STAGE1_IDLE_MS)) {
+        } else if (idle_ticks >= pdMS_TO_TICKS(POWER_STAGE1_IDLE_MS) &&
+                   s_stage != POWER_STAGE_DISPLAY_OFF) {
             power_manager_set_stage(POWER_STAGE_SLEEPY);
         }
 
@@ -276,6 +277,19 @@ void power_manager_notify_activity(void)
     if (s_stage != POWER_STAGE_AWAKE) {
         power_manager_set_stage(POWER_STAGE_AWAKE);
     }
+}
+
+esp_err_t power_manager_enter_stage2(void)
+{
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!power_manager_can_sleep()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    power_manager_set_stage(POWER_STAGE_DISPLAY_OFF);
+    return ESP_OK;
 }
 
 bool power_manager_is_low_power(void)

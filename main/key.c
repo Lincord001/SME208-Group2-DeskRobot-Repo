@@ -23,8 +23,9 @@
 #define KEY_7_GPIO 21
 #define KEY_8_GPIO 45
 
-#define KEY_WIFI_CONFIG_ID 8
-#define KEY_WIFI_CONFIG_LONG_PRESS_MS 3000
+#define KEY_LOW_POWER_STAGE2_ID 7
+#define KEY_WIFI_CONFIG_ID      8
+#define KEY_LONG_PRESS_MS       3000
 
 typedef struct {
     uint8_t key_id;
@@ -105,7 +106,7 @@ esp_err_t key_init(QueueHandle_t led_event_queue)
     }
 
     button_config_t button_cfg = {
-        .long_press_time = KEY_WIFI_CONFIG_LONG_PRESS_MS,
+        .long_press_time = KEY_LONG_PRESS_MS,
         .short_press_time = 0,
     };
 
@@ -128,7 +129,8 @@ esp_err_t key_init(QueueHandle_t led_event_queue)
             return err;
         }
 
-        if (s_key_ctx[i].key_id == KEY_WIFI_CONFIG_ID) {
+        if (s_key_ctx[i].key_id == KEY_LOW_POWER_STAGE2_ID ||
+            s_key_ctx[i].key_id == KEY_WIFI_CONFIG_ID) {
             err = iot_button_register_cb(s_button_handles[i], BUTTON_SINGLE_CLICK, NULL,
                                          key_single_click_cb, &s_key_ctx[i]);
             if (err != ESP_OK) {

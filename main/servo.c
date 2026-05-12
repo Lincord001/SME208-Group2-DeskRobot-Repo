@@ -18,7 +18,7 @@
 #define SERVO_PWM_MAX_DUTY       (SERVO_PWM_DUTY_STEPS - 1U)
 
 #define SERVO_MIN_ANGLE_DEG      0
-#define SERVO_CENTER_ANGLE_DEG   90
+#define SERVO_CENTER_ANGLE_DEG   100
 #define SERVO_MAX_ANGLE_DEG      180
 #define SERVO_LOOK_DOWN_ANGLE_DEG 80
 
@@ -255,7 +255,11 @@ static void servo_process_command(const servo_command_t *cmd)
 
     servo_axis_state_t *axis = &s_axes[cmd->axis];
     if (cmd->type == SERVO_CMD_ABSOLUTE) {
+        bool was_disabled = !axis->enabled;
         servo_set_target(axis, cmd->value_deg);
+        if (was_disabled && axis->current_angle == axis->target_angle) {
+            (void)servo_apply_angle(axis, axis->target_angle);
+        }
         return;
     }
 
@@ -374,10 +378,11 @@ esp_err_t servo_init(void)
 
     s_initialized = true;
     ESP_LOGI(TAG,
-             "Initialized with startup idle, relative step=%d deg, step_delay=%d ms",
+             "Initialized with startup center, relative step=%d deg, step_delay=%d ms",
              SERVO_ANGLE_DELTA_DEG, SERVO_STEP_DELAY_MS);
     ESP_LOGI(TAG,
              "First press enables an axis, later presses move it relatively");
+    servo_center();
     return ESP_OK;
 }
 
