@@ -23,6 +23,7 @@
 #define TTS_EVENT_TIMEOUT_MS   45000
 #define TTS_SEND_TIMEOUT_TICKS pdMS_TO_TICKS(5000)
 #define TTS_WS_BUFFER_SIZE     4096
+#define TTS_WS_TASK_STACK      4096
 
 static const char *TAG = "tts_client";
 
@@ -411,7 +412,7 @@ esp_err_t tts_client_synthesize_to_audio_buffer(const char *text,
         .uri = api_config_get_tts_url(),
         .headers = headers,
         .disable_auto_reconnect = true,
-        .task_stack = 6144,
+        .task_stack = TTS_WS_TASK_STACK,
         .buffer_size = TTS_WS_BUFFER_SIZE,
         .network_timeout_ms = 15000,
         .crt_bundle_attach = esp_crt_bundle_attach,

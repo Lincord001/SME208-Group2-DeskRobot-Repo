@@ -7,6 +7,7 @@
 
 #include <cJSON.h>
 #include <esp_crt_bundle.h>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_websocket_client.h>
 #include <freertos/FreeRTOS.h>
@@ -24,6 +25,7 @@
 #define ASR_EVENT_TIMEOUT_MS      30000
 #define ASR_SEND_TIMEOUT_TICKS    pdMS_TO_TICKS(5000)
 #define ASR_WS_BUFFER_SIZE        4096
+#define ASR_WS_TASK_STACK         4096
 
 static const char *TAG = "asr_client";
 
@@ -181,7 +183,11 @@ static esp_err_t asr_send_audio_chunk(esp_websocket_client_handle_t client,
         return ESP_FAIL;
     }
 
-    unsigned char *b64 = (unsigned char *)malloc(b64_len + 1);
+    unsigned char *b64 = (unsigned char *)heap_caps_malloc(b64_len + 1,
+                                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (b64 == NULL) {
+        b64 = (unsigned char *)malloc(b64_len + 1);
+    }
     if (b64 == NULL) {
         return ESP_ERR_NO_MEM;
     }
@@ -199,9 +205,16 @@ static esp_err_t asr_send_audio_chunk(esp_websocket_client_handle_t client,
         return ESP_ERR_NO_MEM;
     }
 
+    cJSON *audio = cJSON_CreateStringReference((const char *)b64);
+    if (audio == NULL) {
+        cJSON_Delete(root);
+        free(b64);
+        return ESP_ERR_NO_MEM;
+    }
+
     cJSON_AddStringToObject(root, "event_id", "esp32_audio_append");
     cJSON_AddStringToObject(root, "type", "input_audio_buffer.append");
-    cJSON_AddStringToObject(root, "audio", (const char *)b64);
+    cJSON_AddItemToObject(root, "audio", audio);
     esp_err_t err = asr_ws_send_json(client, root);
     cJSON_Delete(root);
     free(b64);
@@ -229,7 +242,11 @@ static void asr_ws_event_handler(void *handler_args,
             break;
         }
 
-        char *message = (char *)calloc(1, (size_t)data->data_len + 1);
+        char *message = (char *)heap_caps_calloc(1, (size_t)data->data_len + 1,
+                                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (message == NULL) {
+            message = (char *)calloc(1, (size_t)data->data_len + 1);
+        }
         if (message == NULL) {
             xEventGroupSetBits(session->events, ASR_ERROR_BIT);
             break;
@@ -297,7 +314,11 @@ static esp_err_t asr_send_audio_from_pcm(esp_websocket_client_handle_t client,
                                          uint32_t sample_rate_hz)
 {
     const size_t input_chunk_samples = 2400; // 100 ms at 24 kHz
-    int16_t *chunk16 = (int16_t *)malloc(ASR_CHUNK_BYTES);
+    int16_t *chunk16 = (int16_t *)heap_caps_malloc(ASR_CHUNK_BYTES,
+                                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (chunk16 == NULL) {
+        chunk16 = (int16_t *)malloc(ASR_CHUNK_BYTES);
+    }
     if (chunk16 == NULL) {
         return ESP_ERR_NO_MEM;
     }
@@ -389,14 +410,25 @@ esp_err_t asr_client_recognize_pcm16(const int16_t *pcm,
         .uri = api_config_get_asr_url(),
         .headers = headers,
         .disable_auto_reconnect = true,
-        .task_stack = 6144,
+        .task_stack = ASR_WS_TASK_STACK,
         .buffer_size = ASR_WS_BUFFER_SIZE,
         .network_timeout_ms = 15000,
         .crt_bundle_attach = esp_crt_bundle_attach,
     };
 
+    ESP_LOGI(TAG,
+             "ASR heap before websocket init: internal=%u psram=%u largest_internal=%u",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+
     esp_websocket_client_handle_t client = esp_websocket_client_init(&config);
     if (client == NULL) {
+        ESP_LOGE(TAG,
+                 "ASR websocket init failed: internal=%u psram=%u largest_internal=%u",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
         vEventGroupDelete(events);
         return ESP_FAIL;
     }
@@ -414,7 +446,12 @@ esp_err_t asr_client_recognize_pcm16(const int16_t *pcm,
     ESP_LOGI(TAG, "Connecting ASR WebSocket: %s", api_config_get_asr_url());
     err = esp_websocket_client_start(client);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start ASR WebSocket: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG,
+                 "Failed to start ASR WebSocket: %s internal=%u psram=%u largest_internal=%u",
+                 esp_err_to_name(err),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
         esp_websocket_client_destroy(client);
         vEventGroupDelete(events);
         return err;

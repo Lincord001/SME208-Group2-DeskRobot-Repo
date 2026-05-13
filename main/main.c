@@ -31,6 +31,7 @@
 
 #include "audio_mic.h"
 #include "audio_spk.h"
+#include "ble_serial.h"
 #include "display.h"
 #include "key.h"
 #include "led.h"
@@ -485,6 +486,11 @@ void app_main(void)
     err = power_manager_init(&s_audio_buf);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "power_manager_init: %s", esp_err_to_name(err));
+    }
+
+    err = ble_serial_init(&s_audio_buf, AUDIO_SAMPLE_RATE);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "ble_serial_init: %s", esp_err_to_name(err));
     }
 
     ESP_LOGI(TAG,

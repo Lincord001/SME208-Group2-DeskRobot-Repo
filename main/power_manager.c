@@ -18,6 +18,7 @@
 
 #define POWER_STAGE1_IDLE_MS 10000
 #define POWER_STAGE2_IDLE_MS 20000
+#define POWER_IDLE_TIMEOUT_MIN_MS 1000
 #define POWER_TASK_STACK     3072
 #define POWER_TASK_PRIO      3
 #define POWER_POLL_MS        250
@@ -38,6 +39,8 @@ static volatile bool s_initialized;
 static volatile power_stage_t s_stage = POWER_STAGE_AWAKE;
 static TickType_t s_last_activity_tick;
 static TickType_t s_last_observe_log_tick;
+static uint32_t s_stage1_idle_ms = POWER_STAGE1_IDLE_MS;
+static uint32_t s_stage2_idle_ms = POWER_STAGE2_IDLE_MS;
 static bool s_cpu_low_freq_limited;
 
 static const char *power_manager_stage_to_string(power_stage_t stage)
@@ -224,9 +227,9 @@ static void power_manager_task(void *arg)
             if (s_stage != POWER_STAGE_AWAKE) {
                 power_manager_set_stage(POWER_STAGE_AWAKE);
             }
-        } else if (idle_ticks >= pdMS_TO_TICKS(POWER_STAGE2_IDLE_MS)) {
+        } else if (idle_ticks >= pdMS_TO_TICKS(s_stage2_idle_ms)) {
             power_manager_set_stage(POWER_STAGE_DISPLAY_OFF);
-        } else if (idle_ticks >= pdMS_TO_TICKS(POWER_STAGE1_IDLE_MS) &&
+        } else if (idle_ticks >= pdMS_TO_TICKS(s_stage1_idle_ms) &&
                    s_stage != POWER_STAGE_DISPLAY_OFF) {
             power_manager_set_stage(POWER_STAGE_SLEEPY);
         }
@@ -266,7 +269,7 @@ esp_err_t power_manager_init(audio_buffer_t *audio_buffer)
 
     s_initialized = true;
     ESP_LOGI(TAG, "Initialized: stage1=%u ms stage2=%u ms",
-             POWER_STAGE1_IDLE_MS, POWER_STAGE2_IDLE_MS);
+             (unsigned)s_stage1_idle_ms, (unsigned)s_stage2_idle_ms);
     power_manager_log_observability("init");
     return ESP_OK;
 }
@@ -283,6 +286,19 @@ void power_manager_notify_activity(void)
     }
 }
 
+esp_err_t power_manager_enter_stage1(void)
+{
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!power_manager_can_sleep()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    power_manager_set_stage(POWER_STAGE_SLEEPY);
+    return ESP_OK;
+}
+
 esp_err_t power_manager_enter_stage2(void)
 {
     if (!s_initialized) {
@@ -294,6 +310,34 @@ esp_err_t power_manager_enter_stage2(void)
 
     power_manager_set_stage(POWER_STAGE_DISPLAY_OFF);
     return ESP_OK;
+}
+
+esp_err_t power_manager_set_idle_timeouts_ms(uint32_t stage1_ms,
+                                             uint32_t stage2_ms)
+{
+    if (stage1_ms < POWER_IDLE_TIMEOUT_MIN_MS ||
+        stage2_ms < POWER_IDLE_TIMEOUT_MIN_MS ||
+        stage1_ms >= stage2_ms) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    s_stage1_idle_ms = stage1_ms;
+    s_stage2_idle_ms = stage2_ms;
+    power_manager_notify_activity();
+    ESP_LOGI(TAG, "Idle timeouts updated: stage1=%u ms stage2=%u ms",
+             (unsigned)s_stage1_idle_ms, (unsigned)s_stage2_idle_ms);
+    return ESP_OK;
+}
+
+void power_manager_get_idle_timeouts_ms(uint32_t *out_stage1_ms,
+                                        uint32_t *out_stage2_ms)
+{
+    if (out_stage1_ms != NULL) {
+        *out_stage1_ms = s_stage1_idle_ms;
+    }
+    if (out_stage2_ms != NULL) {
+        *out_stage2_ms = s_stage2_idle_ms;
+    }
 }
 
 bool power_manager_is_low_power(void)

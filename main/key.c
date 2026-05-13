@@ -30,7 +30,7 @@
 #define KEY_SERVO_HORIZONTAL_RIGHT_ID 6
 #define KEY_USAGE_GUIDE_ID           7
 #define KEY_WIFI_CONFIG_ID           8
-#define KEY_LONG_PRESS_MS            1500
+#define KEY_LONG_PRESS_MS            500
 
 typedef struct {
     uint8_t key_id;

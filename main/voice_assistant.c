@@ -9,6 +9,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include "sdkconfig.h"
+
 #include "asr_client.h"
 #include "display.h"
 #include "llm_client.h"
@@ -41,6 +43,49 @@ typedef struct {
     audio_buffer_t *audio_buffer;
     uint32_t sample_rate_hz;
 } voice_full_task_arg_t;
+
+static BaseType_t voice_assistant_create_task(TaskFunction_t task_func,
+                                              const char *name,
+                                              uint32_t stack_size,
+                                              void *arg,
+                                              TaskHandle_t *task_handle)
+{
+#if CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+    BaseType_t created = xTaskCreateWithCaps(task_func,
+                                             name,
+                                             stack_size,
+                                             arg,
+                                             4,
+                                             task_handle,
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (created == pdPASS) {
+        return pdPASS;
+    }
+
+    ESP_LOGW(TAG,
+             "%s task PSRAM stack allocation failed; retrying with internal stack",
+             name);
+#else
+    BaseType_t created;
+#endif
+
+    created = xTaskCreate(task_func,
+                          name,
+                          stack_size,
+                          arg,
+                          4,
+                          task_handle);
+    if (created == pdPASS) {
+        return pdPASS;
+    }
+
+    ESP_LOGE(TAG,
+             "%s task create failed, free internal=%u, free psram=%u",
+             name,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    return created;
+}
 
 static void voice_assistant_llm_test_task(void *arg)
 {
@@ -187,7 +232,6 @@ static void voice_assistant_full_test_task(void *arg)
     uint32_t sample_rate_hz = task_arg->sample_rate_hz;
     free(task_arg);
 
-    int16_t *pcm_copy = NULL;
     char transcript[512];
     char reply[1024];
     bool servo_thinking_started = false;
@@ -219,25 +263,6 @@ static void voice_assistant_full_test_task(void *arg)
 
     size_t recorded_size = audio_state.recorded_size;
     size_t sample_count = recorded_size / sizeof(int16_t);
-    pcm_copy = (int16_t *)heap_caps_malloc(recorded_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (pcm_copy == NULL) {
-        pcm_copy = (int16_t *)malloc(recorded_size);
-    }
-    if (pcm_copy == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate ASR PCM copy (%u bytes)", (unsigned)recorded_size);
-        system_status_voice_end(SYSTEM_STATUS_VOICE_ASR, ESP_ERR_NO_MEM, "no mem");
-        display_set_error();
-        goto done;
-    }
-
-    memcpy(pcm_copy, audio_buffer->buffer, recorded_size);
-
-    err = servo_start_thinking_motion();
-    if (err == ESP_OK) {
-        servo_thinking_started = true;
-    } else {
-        ESP_LOGW(TAG, "Failed to start servo thinking motion: %s", esp_err_to_name(err));
-    }
 
     ESP_LOGI(TAG, "Full voice test: ASR samples=%u sample_rate=%lu",
              (unsigned)sample_count,
@@ -246,7 +271,7 @@ static void voice_assistant_full_test_task(void *arg)
     display_set_status("Recognizing", "ASR");
 
     system_status_voice_begin(SYSTEM_STATUS_VOICE_ASR);
-    err = asr_client_recognize_pcm16(pcm_copy,
+    err = asr_client_recognize_pcm16(audio_buffer->buffer,
                                      sample_count,
                                      sample_rate_hz,
                                      transcript,
@@ -260,6 +285,12 @@ static void voice_assistant_full_test_task(void *arg)
 
     ESP_LOGI(TAG, "Full voice ASR transcript: %s", transcript);
     display_set_thinking(0);
+    err = servo_start_thinking_motion();
+    if (err == ESP_OK) {
+        servo_thinking_started = true;
+    } else {
+        ESP_LOGW(TAG, "Failed to start servo thinking motion: %s", esp_err_to_name(err));
+    }
 
     system_status_voice_begin(SYSTEM_STATUS_VOICE_LLM);
     err = llm_client_chat(transcript, reply, sizeof(reply));
@@ -293,7 +324,6 @@ done:
     if (servo_thinking_started) {
         servo_stop_thinking_motion();
     }
-    free(pcm_copy);
     s_full_task = NULL;
     vTaskDelete(NULL);
 }
@@ -320,12 +350,11 @@ esp_err_t voice_assistant_start_llm_test(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    if (xTaskCreate(voice_assistant_llm_test_task,
-                    "llm_test",
-                    VOICE_LLM_TASK_STACK_SIZE,
-                    NULL,
-                    4,
-                    &s_llm_task) != pdPASS) {
+    if (voice_assistant_create_task(voice_assistant_llm_test_task,
+                                    "llm_test",
+                                    VOICE_LLM_TASK_STACK_SIZE,
+                                    NULL,
+                                    &s_llm_task) != pdPASS) {
         s_llm_task = NULL;
         return ESP_ERR_NO_MEM;
     }
@@ -346,12 +375,11 @@ esp_err_t voice_assistant_start_tts_test(audio_buffer_t *audio_buffer)
     }
     task_arg->audio_buffer = audio_buffer;
 
-    if (xTaskCreate(voice_assistant_tts_test_task,
-                    "tts_test",
-                    VOICE_TTS_TASK_STACK_SIZE,
-                    task_arg,
-                    4,
-                    &s_tts_task) != pdPASS) {
+    if (voice_assistant_create_task(voice_assistant_tts_test_task,
+                                    "tts_test",
+                                    VOICE_TTS_TASK_STACK_SIZE,
+                                    task_arg,
+                                    &s_tts_task) != pdPASS) {
         free(task_arg);
         s_tts_task = NULL;
         return ESP_ERR_NO_MEM;
@@ -375,12 +403,11 @@ esp_err_t voice_assistant_start_full_test(audio_buffer_t *audio_buffer,
     task_arg->audio_buffer = audio_buffer;
     task_arg->sample_rate_hz = sample_rate_hz;
 
-    if (xTaskCreate(voice_assistant_full_test_task,
-                    "voice_full",
-                    VOICE_FULL_TASK_STACK_SIZE,
-                    task_arg,
-                    4,
-                    &s_full_task) != pdPASS) {
+    if (voice_assistant_create_task(voice_assistant_full_test_task,
+                                    "voice_full",
+                                    VOICE_FULL_TASK_STACK_SIZE,
+                                    task_arg,
+                                    &s_full_task) != pdPASS) {
         free(task_arg);
         s_full_task = NULL;
         return ESP_ERR_NO_MEM;
@@ -406,12 +433,11 @@ esp_err_t voice_assistant_start_asr_test(const audio_buffer_t *audio_buffer,
     task_arg->audio_buffer = audio_buffer;
     task_arg->sample_rate_hz = sample_rate_hz;
 
-    if (xTaskCreate(voice_assistant_asr_test_task,
-                    "asr_test",
-                    VOICE_ASR_TASK_STACK_SIZE,
-                    task_arg,
-                    4,
-                    &s_asr_task) != pdPASS) {
+    if (voice_assistant_create_task(voice_assistant_asr_test_task,
+                                    "asr_test",
+                                    VOICE_ASR_TASK_STACK_SIZE,
+                                    task_arg,
+                                    &s_asr_task) != pdPASS) {
         free(task_arg);
         s_asr_task = NULL;
         return ESP_ERR_NO_MEM;

@@ -18,9 +18,10 @@
 #define SERVO_PWM_MAX_DUTY       (SERVO_PWM_DUTY_STEPS - 1U)
 
 #define SERVO_MIN_ANGLE_DEG      0
-#define SERVO_CENTER_ANGLE_DEG   100
+#define SERVO_HORIZONTAL_CENTER_ANGLE_DEG 100
+#define SERVO_VERTICAL_CENTER_ANGLE_DEG   110
 #define SERVO_MAX_ANGLE_DEG      180
-#define SERVO_LOOK_DOWN_ANGLE_DEG 80
+#define SERVO_LOOK_DOWN_ANGLE_DEG 90
 
 #define SERVO_MIN_PULSE_US       500
 #define SERVO_CENTER_PULSE_US    1500
@@ -88,16 +89,16 @@ static servo_axis_state_t s_axes[SERVO_AXIS_COUNT] = {
         .name = "horizontal",
         .gpio_num = SERVO_HORIZONTAL_GPIO,
         .channel = LEDC_CHANNEL_0,
-        .current_angle = SERVO_CENTER_ANGLE_DEG,
-        .target_angle = SERVO_CENTER_ANGLE_DEG,
+        .current_angle = SERVO_HORIZONTAL_CENTER_ANGLE_DEG,
+        .target_angle = SERVO_HORIZONTAL_CENTER_ANGLE_DEG,
         .enabled = false,
     },
     [SERVO_AXIS_VERTICAL] = {
         .name = "vertical",
         .gpio_num = SERVO_VERTICAL_GPIO,
         .channel = LEDC_CHANNEL_1,
-        .current_angle = SERVO_CENTER_ANGLE_DEG,
-        .target_angle = SERVO_CENTER_ANGLE_DEG,
+        .current_angle = SERVO_VERTICAL_CENTER_ANGLE_DEG,
+        .target_angle = SERVO_VERTICAL_CENTER_ANGLE_DEG,
         .enabled = false,
     },
 };
@@ -493,16 +494,16 @@ static void servo_motion_task(void *arg)
     while (s_motion_running && s_motion_mode == mode) {
         const servo_motion_point_t *point = &points[idx];
         (void)servo_queue_absolute(SERVO_AXIS_HORIZONTAL,
-                                   SERVO_CENTER_ANGLE_DEG + point->horizontal);
+                                   SERVO_HORIZONTAL_CENTER_ANGLE_DEG + point->horizontal);
         (void)servo_queue_absolute(SERVO_AXIS_VERTICAL,
-                                   SERVO_CENTER_ANGLE_DEG + point->vertical);
+                                   SERVO_VERTICAL_CENTER_ANGLE_DEG + point->vertical);
 
         idx = (idx + 1) % point_count;
         vTaskDelay(pdMS_TO_TICKS(step_ms));
     }
 
-    (void)servo_queue_absolute(SERVO_AXIS_HORIZONTAL, SERVO_CENTER_ANGLE_DEG);
-    (void)servo_queue_absolute(SERVO_AXIS_VERTICAL, SERVO_CENTER_ANGLE_DEG);
+    (void)servo_queue_absolute(SERVO_AXIS_HORIZONTAL, SERVO_HORIZONTAL_CENTER_ANGLE_DEG);
+    (void)servo_queue_absolute(SERVO_AXIS_VERTICAL, SERVO_VERTICAL_CENTER_ANGLE_DEG);
 
     ESP_LOGI(TAG, "%s motion stopped", servo_motion_mode_name(mode));
     s_motion_mode = SERVO_MOTION_NONE;
@@ -598,13 +599,13 @@ void servo_stop_playback_motion(void)
 void servo_center(void)
 {
     servo_stop_motion(SERVO_MOTION_NONE);
-    (void)servo_queue_absolute(SERVO_AXIS_HORIZONTAL, SERVO_CENTER_ANGLE_DEG);
-    (void)servo_queue_absolute(SERVO_AXIS_VERTICAL, SERVO_CENTER_ANGLE_DEG);
+    (void)servo_queue_absolute(SERVO_AXIS_HORIZONTAL, SERVO_HORIZONTAL_CENTER_ANGLE_DEG);
+    (void)servo_queue_absolute(SERVO_AXIS_VERTICAL, SERVO_VERTICAL_CENTER_ANGLE_DEG);
 }
 
 void servo_look_down(void)
 {
     servo_stop_motion(SERVO_MOTION_NONE);
-    (void)servo_queue_absolute(SERVO_AXIS_HORIZONTAL, SERVO_CENTER_ANGLE_DEG);
+    (void)servo_queue_absolute(SERVO_AXIS_HORIZONTAL, SERVO_HORIZONTAL_CENTER_ANGLE_DEG);
     (void)servo_queue_absolute(SERVO_AXIS_VERTICAL, SERVO_LOOK_DOWN_ANGLE_DEG);
 }
