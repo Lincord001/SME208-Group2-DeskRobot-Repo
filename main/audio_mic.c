@@ -240,10 +240,26 @@ void audio_mic_set_recording(bool enable)
         audio_buffer_unlock(s_audio_buf);
         ESP_LOGI(TAG, "Recording started");
     } else {
+        size_t recorded_size = 0;
+        bool finalized_recording = false;
+
         audio_buffer_lock(s_audio_buf);
         s_audio_buf->recording = false;
+        if (s_audio_buf->current_write_pos > 0 &&
+            !s_audio_buf->recording_complete) {
+            s_audio_buf->recorded_size =
+                s_audio_buf->current_write_pos * sizeof(int16_t);
+            s_audio_buf->recording_complete = true;
+            recorded_size = s_audio_buf->recorded_size;
+            finalized_recording = true;
+        }
         audio_buffer_unlock(s_audio_buf);
-        /* recorded_size 和 recording_complete 由任务内收尾设置 */
-        ESP_LOGI(TAG, "Recording stop requested");
+        /* Stop must publish a stable completed buffer before ASR can start. */
+        if (finalized_recording) {
+            ESP_LOGI(TAG, "Recording stopped, %u bytes saved",
+                     (unsigned)recorded_size);
+        } else {
+            ESP_LOGI(TAG, "Recording stop requested");
+        }
     }
 }

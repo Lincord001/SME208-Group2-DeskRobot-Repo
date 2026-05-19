@@ -22,7 +22,8 @@
 #define TTS_FINISHED_BIT  BIT1
 #define TTS_ERROR_BIT     BIT2
 
-#define TTS_EVENT_TIMEOUT_MS   45000
+#define TTS_EVENT_TIMEOUT_MS   30000
+#define TTS_CANCEL_POLL_MS     100
 #define TTS_SEND_TIMEOUT_TICKS pdMS_TO_TICKS(5000)
 #define TTS_WS_BUFFER_SIZE     4096
 #define TTS_WS_TASK_STACK      4096
@@ -48,7 +49,42 @@ typedef struct {
     int64_t first_audio_us;
     int64_t last_monitor_us;
     size_t last_monitor_bytes;
+    bool (*cancel_cb)(void *ctx);
+    void *cancel_ctx;
 } tts_session_t;
+
+static bool tts_is_canceled(const tts_session_t *session)
+{
+    return session != NULL &&
+           session->cancel_cb != NULL &&
+           session->cancel_cb(session->cancel_ctx);
+}
+
+static EventBits_t tts_wait_bits(tts_session_t *session,
+                                 EventBits_t bits_to_wait_for,
+                                 uint32_t timeout_ms)
+{
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+    EventBits_t bits = 0;
+
+    do {
+        if (tts_is_canceled(session)) {
+            xEventGroupSetBits(session->events, TTS_ERROR_BIT);
+            return TTS_ERROR_BIT;
+        }
+
+        bits = xEventGroupWaitBits(session->events,
+                                   bits_to_wait_for,
+                                   pdFALSE,
+                                   pdFALSE,
+                                   pdMS_TO_TICKS(TTS_CANCEL_POLL_MS));
+        if ((bits & bits_to_wait_for) != 0) {
+            return bits;
+        }
+    } while ((int32_t)(deadline - xTaskGetTickCount()) > 0);
+
+    return bits;
+}
 
 static esp_err_t tts_accumulate_message(tts_session_t *session,
                                         const esp_websocket_event_data_t *data,
@@ -372,6 +408,10 @@ static void tts_ws_event_handler(void *handler_args,
         if (data->data_ptr == NULL || data->data_len <= 0 || data->op_code != 0x1) {
             break;
         }
+        if (tts_is_canceled(session)) {
+            xEventGroupSetBits(session->events, TTS_ERROR_BIT);
+            break;
+        }
 
         char *message = NULL;
         esp_err_t err = tts_accumulate_message(session, data, &message);
@@ -456,6 +496,19 @@ esp_err_t tts_client_synthesize_to_audio_buffer(const char *text,
                                                 audio_buffer_t *audio_buffer,
                                                 size_t *out_audio_bytes)
 {
+    return tts_client_synthesize_to_audio_buffer_with_cancel(text,
+                                                             audio_buffer,
+                                                             out_audio_bytes,
+                                                             NULL,
+                                                             NULL);
+}
+
+esp_err_t tts_client_synthesize_to_audio_buffer_with_cancel(const char *text,
+                                                            audio_buffer_t *audio_buffer,
+                                                            size_t *out_audio_bytes,
+                                                            bool (*cancel_cb)(void *ctx),
+                                                            void *cancel_ctx)
+{
     if (text == NULL || text[0] == '\0' || out_audio_bytes == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -494,6 +547,8 @@ esp_err_t tts_client_synthesize_to_audio_buffer(const char *text,
         .events = events,
         .audio_buffer = audio_buffer,
         .request_start_us = esp_timer_get_time(),
+        .cancel_cb = cancel_cb,
+        .cancel_ctx = cancel_ctx,
     };
 
     char headers[160];
@@ -536,14 +591,12 @@ esp_err_t tts_client_synthesize_to_audio_buffer(const char *text,
         return err;
     }
 
-    EventBits_t bits = xEventGroupWaitBits(events,
-                                           TTS_CONNECTED_BIT | TTS_ERROR_BIT,
-                                           pdFALSE,
-                                           pdFALSE,
-                                           pdMS_TO_TICKS(TTS_EVENT_TIMEOUT_MS));
+    EventBits_t bits = tts_wait_bits(&session,
+                                     TTS_CONNECTED_BIT | TTS_ERROR_BIT,
+                                     TTS_EVENT_TIMEOUT_MS);
     if ((bits & TTS_CONNECTED_BIT) == 0) {
         ESP_LOGE(TAG, "TTS WebSocket connect timeout/error");
-        err = ESP_ERR_TIMEOUT;
+        err = tts_is_canceled(&session) ? ESP_ERR_INVALID_STATE : ESP_ERR_TIMEOUT;
         goto cleanup;
     }
 
@@ -562,14 +615,12 @@ esp_err_t tts_client_synthesize_to_audio_buffer(const char *text,
         goto cleanup;
     }
 
-    bits = xEventGroupWaitBits(events,
-                               TTS_FINISHED_BIT | TTS_ERROR_BIT,
-                               pdFALSE,
-                               pdFALSE,
-                               pdMS_TO_TICKS(TTS_EVENT_TIMEOUT_MS));
+    bits = tts_wait_bits(&session,
+                         TTS_FINISHED_BIT | TTS_ERROR_BIT,
+                         TTS_EVENT_TIMEOUT_MS);
     if ((bits & TTS_FINISHED_BIT) == 0) {
         ESP_LOGE(TAG, "TTS session finish timeout/error");
-        err = ESP_ERR_TIMEOUT;
+        err = tts_is_canceled(&session) ? ESP_ERR_INVALID_STATE : ESP_ERR_TIMEOUT;
         goto cleanup;
     }
 

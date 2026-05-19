@@ -41,6 +41,7 @@
 #define SERVO_PLAYBACK_STEP_MS    160
 #define SERVO_LISTENING_STEP_MS   260
 #define SERVO_THINKING_STEP_MS    140
+#define SERVO_ASR_STEP_MS         110
 
 #define SERVO_HORIZONTAL_GPIO    GPIO_NUM_16
 #define SERVO_VERTICAL_GPIO      GPIO_NUM_17
@@ -59,6 +60,7 @@ typedef enum {
     SERVO_MOTION_THINKING,
     SERVO_MOTION_ORBIT,
     SERVO_MOTION_PLAYBACK,
+    SERVO_MOTION_ASR,
 } servo_motion_mode_t;
 
 typedef struct {
@@ -154,6 +156,15 @@ static const servo_motion_point_t s_thinking_points[] = {
     {+5, 0},
     {+2, -4},
     {-3, -3},
+};
+
+static const servo_motion_point_t s_asr_points[] = {
+    {-10, -7},
+    {-4, +6},
+    {+2, -5},
+    {+9, +7},
+    {+4, -6},
+    {-2, +5},
 };
 
 static uint32_t servo_angle_to_duty(int angle_deg)
@@ -447,6 +458,8 @@ static const char *servo_motion_mode_name(servo_motion_mode_t mode)
         return "orbit";
     case SERVO_MOTION_PLAYBACK:
         return "playback";
+    case SERVO_MOTION_ASR:
+        return "asr";
     case SERVO_MOTION_NONE:
     default:
         return "none";
@@ -472,6 +485,11 @@ static const servo_motion_point_t *servo_motion_points(servo_motion_mode_t mode,
         *out_count = sizeof(s_playback_points) / sizeof(s_playback_points[0]);
         *out_step_ms = SERVO_PLAYBACK_STEP_MS;
         return s_playback_points;
+
+    case SERVO_MOTION_ASR:
+        *out_count = sizeof(s_asr_points) / sizeof(s_asr_points[0]);
+        *out_step_ms = SERVO_ASR_STEP_MS;
+        return s_asr_points;
 
     case SERVO_MOTION_ORBIT:
     default:
@@ -594,6 +612,16 @@ esp_err_t servo_start_playback_motion(void)
 void servo_stop_playback_motion(void)
 {
     servo_stop_motion(SERVO_MOTION_PLAYBACK);
+}
+
+esp_err_t servo_start_asr_motion(void)
+{
+    return servo_start_motion(SERVO_MOTION_ASR);
+}
+
+void servo_stop_asr_motion(void)
+{
+    servo_stop_motion(SERVO_MOTION_ASR);
 }
 
 void servo_center(void)

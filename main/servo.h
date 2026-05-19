@@ -20,6 +20,8 @@ esp_err_t servo_start_orbit_motion(void);
 void servo_stop_orbit_motion(void);
 esp_err_t servo_start_playback_motion(void);
 void servo_stop_playback_motion(void);
+esp_err_t servo_start_asr_motion(void);
+void servo_stop_asr_motion(void);
 void servo_center(void);
 void servo_look_down(void);
 

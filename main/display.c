@@ -335,8 +335,10 @@ static void display_format_text(const display_status_t *status,
         break;
 
     case DISPLAY_STATE_ERROR:
-        snprintf(title, title_size, "Error");
-        snprintf(detail, detail_size, "Check logs");
+        snprintf(title, title_size, "%s",
+                 status->status_title[0] != '\0' ? status->status_title : "Error");
+        snprintf(detail, detail_size, "%s",
+                 status->status_detail[0] != '\0' ? status->status_detail : "Check logs");
         break;
 
     case DISPLAY_STATE_IDLE:
@@ -1160,6 +1162,7 @@ void display_set_status(const char *title, const char *detail)
             s_status.state == DISPLAY_STATE_WIFI ||
             s_status.state == DISPLAY_STATE_STATUS ||
             s_status.state == DISPLAY_STATE_THINKING ||
+            s_status.state == DISPLAY_STATE_ANSWERING ||
             s_status.state == DISPLAY_STATE_ERROR) {
             s_status.state = DISPLAY_STATE_STATUS;
             s_status.elapsed_sec = 0;
@@ -1308,5 +1311,24 @@ void display_set_panel_power(bool enable)
 
 void display_set_error(void)
 {
-    display_update_state(DISPLAY_STATE_ERROR, 0, 0);
+    display_set_error_detail("Error", "Check logs");
+}
+
+void display_set_error_detail(const char *title, const char *detail)
+{
+    if (!s_initialized || s_state_mutex == NULL) {
+        return;
+    }
+
+    if (xSemaphoreTake(s_state_mutex, portMAX_DELAY) == pdTRUE) {
+        s_status.state = DISPLAY_STATE_ERROR;
+        s_status.elapsed_sec = 0;
+        s_status.total_sec = 0;
+        s_status.state_start_tick = xTaskGetTickCount();
+        snprintf(s_status.status_title, sizeof(s_status.status_title),
+                 "%s", title != NULL ? title : "Error");
+        snprintf(s_status.status_detail, sizeof(s_status.status_detail),
+                 "%s", detail != NULL ? detail : "Check logs");
+        xSemaphoreGive(s_state_mutex);
+    }
 }

@@ -9,6 +9,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/portmacro.h>
 
+/* Position fields are sample indexes; size fields are byte counts. */
 typedef struct {
     int16_t *buffer;            // PSRAM中的音频数据缓冲区
     size_t total_size;          // 总缓冲区大小(字节)

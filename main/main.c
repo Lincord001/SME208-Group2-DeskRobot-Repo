@@ -240,6 +240,16 @@ static void main_key_task(void *arg)
             break;
 
         case 2: /* K2：播放 开/停 */
+            if (voice_assistant_is_busy()) {
+                err = voice_assistant_cancel_current();
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "K2: voice cancel rejected (%s)", esp_err_to_name(err));
+                } else {
+                    ESP_LOGI(TAG, "K2: voice cancel requested");
+                }
+                break;
+            }
+
             if (!audio_state.playing) {
                 if (audio_state.recording) {
                     ESP_LOGW(TAG, "K2: stop recording first");

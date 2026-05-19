@@ -7,11 +7,14 @@
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <freertos/task.h>
 
 #include "sdkconfig.h"
 
+#include "api_config.h"
 #include "asr_client.h"
+#include "audio_spk.h"
 #include "display.h"
 #include "llm_client.h"
 #include "servo.h"
@@ -30,6 +33,8 @@ static TaskHandle_t s_llm_task;
 static TaskHandle_t s_asr_task;
 static TaskHandle_t s_tts_task;
 static TaskHandle_t s_full_task;
+static SemaphoreHandle_t s_voice_busy_sem;
+static volatile bool s_voice_cancel_requested;
 
 typedef struct {
     const audio_buffer_t *audio_buffer;
@@ -88,6 +93,87 @@ static BaseType_t voice_assistant_create_task(TaskFunction_t task_func,
     return created;
 }
 
+static esp_err_t voice_assistant_ensure_busy_sem(void)
+{
+    if (s_voice_busy_sem != NULL) {
+        return ESP_OK;
+    }
+
+    s_voice_busy_sem = xSemaphoreCreateBinary();
+    if (s_voice_busy_sem == NULL) {
+        ESP_LOGE(TAG, "Failed to create voice busy semaphore");
+        return ESP_ERR_NO_MEM;
+    }
+
+    xSemaphoreGive(s_voice_busy_sem);
+    return ESP_OK;
+}
+
+static esp_err_t voice_assistant_try_begin_operation(const char *name)
+{
+    esp_err_t err = voice_assistant_ensure_busy_sem();
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    if (xSemaphoreTake(s_voice_busy_sem, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "%s skipped: another voice operation is running", name);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    s_voice_cancel_requested = false;
+    return ESP_OK;
+}
+
+static void voice_assistant_end_operation(void)
+{
+    if (s_voice_busy_sem != NULL) {
+        xSemaphoreGive(s_voice_busy_sem);
+    }
+}
+
+static bool voice_assistant_cancel_cb(void *ctx)
+{
+    (void)ctx;
+    return s_voice_cancel_requested;
+}
+
+static const char *voice_assistant_error_detail(esp_err_t err)
+{
+    if (s_voice_cancel_requested) {
+        return "Canceled";
+    }
+    if (!api_config_has_dashscope_api_key()) {
+        return "No API key";
+    }
+
+    switch (err) {
+    case ESP_ERR_TIMEOUT:
+        return "Request timeout";
+    case ESP_ERR_NO_MEM:
+        return "Out of memory";
+    case ESP_ERR_INVALID_RESPONSE:
+        return "Bad response";
+    case ESP_ERR_INVALID_STATE:
+        return "Busy or invalid";
+    case ESP_ERR_INVALID_ARG:
+        return "No audio";
+    case ESP_ERR_NOT_SUPPORTED:
+        return "Bad sample rate";
+    default:
+        return esp_err_to_name(err);
+    }
+}
+
+static void voice_assistant_show_error(const char *title, esp_err_t err)
+{
+    if (s_voice_cancel_requested) {
+        display_set_status("Canceled", "Voice stopped");
+    } else {
+        display_set_error_detail(title, voice_assistant_error_detail(err));
+    }
+}
+
 static void voice_assistant_show_tts_ready(audio_buffer_t *audio_buffer)
 {
     audio_buffer_state_t audio_state = {0};
@@ -119,6 +205,7 @@ static void voice_assistant_llm_test_task(void *arg)
         system_status_voice_end(SYSTEM_STATUS_VOICE_LLM, ESP_ERR_INVALID_STATE, "wifi offline");
         display_set_status("Network", "Not connected");
         s_llm_task = NULL;
+        voice_assistant_end_operation();
         vTaskDelete(NULL);
         return;
     }
@@ -127,7 +214,11 @@ static void voice_assistant_llm_test_task(void *arg)
     ESP_LOGI(TAG, "LLM test prompt: %s", prompt);
 
     system_status_voice_begin(SYSTEM_STATUS_VOICE_LLM);
-    esp_err_t err = llm_client_chat(prompt, reply, sizeof(reply));
+    esp_err_t err = llm_client_chat_with_cancel(prompt,
+                                                reply,
+                                                sizeof(reply),
+                                                voice_assistant_cancel_cb,
+                                                NULL);
     system_status_voice_end(SYSTEM_STATUS_VOICE_LLM, err, err == ESP_OK ? "ok" : esp_err_to_name(err));
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "LLM reply: %s", reply);
@@ -135,10 +226,11 @@ static void voice_assistant_llm_test_task(void *arg)
         display_set_wifi_status("LLM done");
     } else {
         ESP_LOGE(TAG, "LLM test failed: %s", esp_err_to_name(err));
-        display_set_error();
+        voice_assistant_show_error("LLM failed", err);
     }
 
     s_llm_task = NULL;
+    voice_assistant_end_operation();
     vTaskDelete(NULL);
 }
 
@@ -150,12 +242,14 @@ static void voice_assistant_asr_test_task(void *arg)
     free(task_arg);
 
     char transcript[512];
+    bool servo_asr_started = false;
 
     if (!wifi_network_is_connected()) {
         ESP_LOGW(TAG, "WiFi is not connected; skip ASR test");
         system_status_voice_end(SYSTEM_STATUS_VOICE_ASR, ESP_ERR_INVALID_STATE, "wifi offline");
         display_set_status("Network", "Not connected");
         s_asr_task = NULL;
+        voice_assistant_end_operation();
         vTaskDelete(NULL);
         return;
     }
@@ -173,8 +267,9 @@ static void voice_assistant_asr_test_task(void *arg)
         audio_state.playing) {
         ESP_LOGW(TAG, "No stable recorded audio for ASR test");
         system_status_voice_end(SYSTEM_STATUS_VOICE_ASR, ESP_ERR_INVALID_ARG, "no audio");
-        display_set_error();
+        display_set_error_detail("ASR failed", "No audio");
         s_asr_task = NULL;
+        voice_assistant_end_operation();
         vTaskDelete(NULL);
         return;
     }
@@ -185,13 +280,25 @@ static void voice_assistant_asr_test_task(void *arg)
              (unsigned long)sample_rate_hz);
     display_set_idle();
     display_set_status("Recognizing", "ASR");
+    esp_err_t motion_err = servo_start_asr_motion();
+    if (motion_err == ESP_OK) {
+        servo_asr_started = true;
+    } else {
+        ESP_LOGW(TAG, "Failed to start servo ASR motion: %s",
+                 esp_err_to_name(motion_err));
+    }
 
     system_status_voice_begin(SYSTEM_STATUS_VOICE_ASR);
-    esp_err_t err = asr_client_recognize_pcm16(audio_buffer->buffer,
-                                               sample_count,
-                                               sample_rate_hz,
-                                               transcript,
-                                               sizeof(transcript));
+    esp_err_t err = asr_client_recognize_pcm16_with_cancel(audio_buffer->buffer,
+                                                           sample_count,
+                                                           sample_rate_hz,
+                                                           transcript,
+                                                           sizeof(transcript),
+                                                           voice_assistant_cancel_cb,
+                                                           NULL);
+    if (servo_asr_started) {
+        servo_stop_asr_motion();
+    }
     system_status_voice_end(SYSTEM_STATUS_VOICE_ASR, err, err == ESP_OK ? "ok" : esp_err_to_name(err));
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "ASR transcript: %s", transcript);
@@ -199,10 +306,11 @@ static void voice_assistant_asr_test_task(void *arg)
         display_set_status("Recognized", "ASR done");
     } else {
         ESP_LOGE(TAG, "ASR test failed: %s", esp_err_to_name(err));
-        display_set_error();
+        voice_assistant_show_error("ASR failed", err);
     }
 
     s_asr_task = NULL;
+    voice_assistant_end_operation();
     vTaskDelete(NULL);
 }
 
@@ -220,6 +328,7 @@ static void voice_assistant_tts_test_task(void *arg)
         system_status_voice_end(SYSTEM_STATUS_VOICE_TTS, ESP_ERR_INVALID_STATE, "wifi offline");
         display_set_status("Network", "Not connected");
         s_tts_task = NULL;
+        voice_assistant_end_operation();
         vTaskDelete(NULL);
         return;
     }
@@ -229,7 +338,11 @@ static void voice_assistant_tts_test_task(void *arg)
     display_set_status("Generating", "TTS");
 
     system_status_voice_begin(SYSTEM_STATUS_VOICE_TTS);
-    esp_err_t err = tts_client_synthesize_to_audio_buffer(text, audio_buffer, &audio_bytes);
+    esp_err_t err = tts_client_synthesize_to_audio_buffer_with_cancel(text,
+                                                                      audio_buffer,
+                                                                      &audio_bytes,
+                                                                      voice_assistant_cancel_cb,
+                                                                      NULL);
     system_status_voice_end(SYSTEM_STATUS_VOICE_TTS, err, err == ESP_OK ? "ok" : esp_err_to_name(err));
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "TTS test done, received %u audio bytes; press K2 to play when speaker is available",
@@ -237,10 +350,11 @@ static void voice_assistant_tts_test_task(void *arg)
         voice_assistant_show_tts_ready(audio_buffer);
     } else {
         ESP_LOGE(TAG, "TTS test failed: %s", esp_err_to_name(err));
-        display_set_error();
+        voice_assistant_show_error("TTS failed", err);
     }
 
     s_tts_task = NULL;
+    voice_assistant_end_operation();
     vTaskDelete(NULL);
 }
 
@@ -253,6 +367,7 @@ static void voice_assistant_full_test_task(void *arg)
 
     char transcript[512];
     char reply[1024];
+    bool servo_asr_started = false;
     bool servo_thinking_started = false;
     esp_err_t err = ESP_OK;
 
@@ -276,7 +391,7 @@ static void voice_assistant_full_test_task(void *arg)
         audio_state.playing) {
         ESP_LOGW(TAG, "No stable recorded audio for full voice test");
         system_status_voice_end(SYSTEM_STATUS_VOICE_ASR, ESP_ERR_INVALID_ARG, "no audio");
-        display_set_error();
+        display_set_error_detail("ASR failed", "No audio");
         goto done;
     }
 
@@ -288,17 +403,30 @@ static void voice_assistant_full_test_task(void *arg)
              (unsigned long)sample_rate_hz);
     display_set_idle();
     display_set_status("Recognizing", "ASR");
+    esp_err_t motion_err = servo_start_asr_motion();
+    if (motion_err == ESP_OK) {
+        servo_asr_started = true;
+    } else {
+        ESP_LOGW(TAG, "Failed to start servo ASR motion: %s",
+                 esp_err_to_name(motion_err));
+    }
 
     system_status_voice_begin(SYSTEM_STATUS_VOICE_ASR);
-    err = asr_client_recognize_pcm16(audio_buffer->buffer,
-                                     sample_count,
-                                     sample_rate_hz,
-                                     transcript,
-                                     sizeof(transcript));
+    err = asr_client_recognize_pcm16_with_cancel(audio_buffer->buffer,
+                                                 sample_count,
+                                                 sample_rate_hz,
+                                                 transcript,
+                                                 sizeof(transcript),
+                                                 voice_assistant_cancel_cb,
+                                                 NULL);
+    if (servo_asr_started) {
+        servo_stop_asr_motion();
+        servo_asr_started = false;
+    }
     system_status_voice_end(SYSTEM_STATUS_VOICE_ASR, err, err == ESP_OK ? "ok" : esp_err_to_name(err));
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Full voice ASR failed: %s", esp_err_to_name(err));
-        display_set_error();
+        voice_assistant_show_error("ASR failed", err);
         goto done;
     }
 
@@ -312,11 +440,15 @@ static void voice_assistant_full_test_task(void *arg)
     }
 
     system_status_voice_begin(SYSTEM_STATUS_VOICE_LLM);
-    err = llm_client_chat(transcript, reply, sizeof(reply));
+    err = llm_client_chat_with_cancel(transcript,
+                                      reply,
+                                      sizeof(reply),
+                                      voice_assistant_cancel_cb,
+                                      NULL);
     system_status_voice_end(SYSTEM_STATUS_VOICE_LLM, err, err == ESP_OK ? "ok" : esp_err_to_name(err));
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Full voice LLM failed: %s", esp_err_to_name(err));
-        display_set_error();
+        voice_assistant_show_error("LLM failed", err);
         goto done;
     }
 
@@ -326,11 +458,15 @@ static void voice_assistant_full_test_task(void *arg)
 
     size_t tts_audio_bytes = 0;
     system_status_voice_begin(SYSTEM_STATUS_VOICE_TTS);
-    err = tts_client_synthesize_to_audio_buffer(reply, audio_buffer, &tts_audio_bytes);
+    err = tts_client_synthesize_to_audio_buffer_with_cancel(reply,
+                                                            audio_buffer,
+                                                            &tts_audio_bytes,
+                                                            voice_assistant_cancel_cb,
+                                                            NULL);
     system_status_voice_end(SYSTEM_STATUS_VOICE_TTS, err, err == ESP_OK ? "ok" : esp_err_to_name(err));
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Full voice TTS failed: %s", esp_err_to_name(err));
-        display_set_error();
+        voice_assistant_show_error("TTS failed", err);
         goto done;
     }
 
@@ -339,16 +475,25 @@ static void voice_assistant_full_test_task(void *arg)
     voice_assistant_show_tts_ready(audio_buffer);
 
 done:
+    if (servo_asr_started) {
+        servo_stop_asr_motion();
+    }
     if (servo_thinking_started) {
         servo_stop_thinking_motion();
     }
     s_full_task = NULL;
+    voice_assistant_end_operation();
     vTaskDelete(NULL);
 }
 
 esp_err_t voice_assistant_init(void)
 {
-    esp_err_t err = llm_client_init();
+    esp_err_t err = voice_assistant_ensure_busy_sem();
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = llm_client_init();
     if (err != ESP_OK) {
         return err;
     }
@@ -368,15 +513,48 @@ esp_err_t voice_assistant_start_llm_test(void)
         return ESP_ERR_INVALID_STATE;
     }
 
+    esp_err_t err = voice_assistant_try_begin_operation("LLM test");
+    if (err != ESP_OK) {
+        return err;
+    }
+
     if (voice_assistant_create_task(voice_assistant_llm_test_task,
                                     "llm_test",
                                     VOICE_LLM_TASK_STACK_SIZE,
                                     NULL,
                                     &s_llm_task) != pdPASS) {
         s_llm_task = NULL;
+        voice_assistant_end_operation();
         return ESP_ERR_NO_MEM;
     }
 
+    return ESP_OK;
+}
+
+bool voice_assistant_is_busy(void)
+{
+    if (s_voice_busy_sem == NULL) {
+        return false;
+    }
+
+    if (xSemaphoreTake(s_voice_busy_sem, 0) == pdTRUE) {
+        xSemaphoreGive(s_voice_busy_sem);
+        return false;
+    }
+
+    return true;
+}
+
+esp_err_t voice_assistant_cancel_current(void)
+{
+    if (!voice_assistant_is_busy()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    s_voice_cancel_requested = true;
+    (void)audio_spk_set_playing(false);
+    display_set_status("Canceling", "Voice task");
+    ESP_LOGW(TAG, "Voice operation cancel requested");
     return ESP_OK;
 }
 
@@ -387,8 +565,14 @@ esp_err_t voice_assistant_start_tts_test(audio_buffer_t *audio_buffer)
         return ESP_ERR_INVALID_STATE;
     }
 
+    esp_err_t err = voice_assistant_try_begin_operation("TTS test");
+    if (err != ESP_OK) {
+        return err;
+    }
+
     voice_tts_task_arg_t *task_arg = (voice_tts_task_arg_t *)calloc(1, sizeof(*task_arg));
     if (task_arg == NULL) {
+        voice_assistant_end_operation();
         return ESP_ERR_NO_MEM;
     }
     task_arg->audio_buffer = audio_buffer;
@@ -400,6 +584,7 @@ esp_err_t voice_assistant_start_tts_test(audio_buffer_t *audio_buffer)
                                     &s_tts_task) != pdPASS) {
         free(task_arg);
         s_tts_task = NULL;
+        voice_assistant_end_operation();
         return ESP_ERR_NO_MEM;
     }
 
@@ -414,8 +599,14 @@ esp_err_t voice_assistant_start_full_test(audio_buffer_t *audio_buffer,
         return ESP_ERR_INVALID_STATE;
     }
 
+    esp_err_t err = voice_assistant_try_begin_operation("Full voice test");
+    if (err != ESP_OK) {
+        return err;
+    }
+
     voice_full_task_arg_t *task_arg = (voice_full_task_arg_t *)calloc(1, sizeof(*task_arg));
     if (task_arg == NULL) {
+        voice_assistant_end_operation();
         return ESP_ERR_NO_MEM;
     }
     task_arg->audio_buffer = audio_buffer;
@@ -428,6 +619,7 @@ esp_err_t voice_assistant_start_full_test(audio_buffer_t *audio_buffer,
                                     &s_full_task) != pdPASS) {
         free(task_arg);
         s_full_task = NULL;
+        voice_assistant_end_operation();
         return ESP_ERR_NO_MEM;
     }
 
@@ -443,8 +635,14 @@ esp_err_t voice_assistant_start_asr_test(const audio_buffer_t *audio_buffer,
         return ESP_ERR_INVALID_STATE;
     }
 
+    esp_err_t err = voice_assistant_try_begin_operation("ASR test");
+    if (err != ESP_OK) {
+        return err;
+    }
+
     voice_asr_task_arg_t *task_arg = (voice_asr_task_arg_t *)calloc(1, sizeof(*task_arg));
     if (task_arg == NULL) {
+        voice_assistant_end_operation();
         return ESP_ERR_NO_MEM;
     }
 
@@ -458,6 +656,7 @@ esp_err_t voice_assistant_start_asr_test(const audio_buffer_t *audio_buffer,
                                     &s_asr_task) != pdPASS) {
         free(task_arg);
         s_asr_task = NULL;
+        voice_assistant_end_operation();
         return ESP_ERR_NO_MEM;
     }
 

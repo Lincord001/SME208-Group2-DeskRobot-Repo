@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 #include <esp_err.h>
 
@@ -16,6 +17,13 @@ esp_err_t asr_client_recognize_pcm16(const int16_t *pcm,
                                      uint32_t sample_rate_hz,
                                      char *out_text,
                                      size_t out_text_len);
+esp_err_t asr_client_recognize_pcm16_with_cancel(const int16_t *pcm,
+                                                 size_t sample_count,
+                                                 uint32_t sample_rate_hz,
+                                                 char *out_text,
+                                                 size_t out_text_len,
+                                                 bool (*cancel_cb)(void *ctx),
+                                                 void *cancel_ctx);
 
 #ifdef __cplusplus
 }

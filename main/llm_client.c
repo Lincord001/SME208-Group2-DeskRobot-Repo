@@ -25,15 +25,23 @@ typedef struct {
     char *data;
     size_t len;
     size_t cap;
+    bool (*cancel_cb)(void *ctx);
+    void *cancel_ctx;
 } llm_http_response_t;
 
 static esp_err_t llm_http_event_handler(esp_http_client_event_t *evt)
 {
+    llm_http_response_t *response = (llm_http_response_t *)evt->user_data;
+    if (response != NULL &&
+        response->cancel_cb != NULL &&
+        response->cancel_cb(response->cancel_ctx)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
     if (evt->event_id != HTTP_EVENT_ON_DATA || evt->data == NULL || evt->data_len <= 0) {
         return ESP_OK;
     }
 
-    llm_http_response_t *response = (llm_http_response_t *)evt->user_data;
     if (response == NULL || response->data == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -189,6 +197,15 @@ esp_err_t llm_client_init(void)
 
 esp_err_t llm_client_chat(const char *user_text, char *out_reply, size_t out_reply_len)
 {
+    return llm_client_chat_with_cancel(user_text, out_reply, out_reply_len, NULL, NULL);
+}
+
+esp_err_t llm_client_chat_with_cancel(const char *user_text,
+                                      char *out_reply,
+                                      size_t out_reply_len,
+                                      bool (*cancel_cb)(void *ctx),
+                                      void *cancel_ctx)
+{
     if (user_text == NULL || out_reply == NULL || out_reply_len == 0) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -197,6 +214,9 @@ esp_err_t llm_client_chat(const char *user_text, char *out_reply, size_t out_rep
 
     if (!api_config_has_dashscope_api_key()) {
         ESP_LOGE(TAG, "Missing API key. Create main/api_config_private.h from the example file.");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (cancel_cb != NULL && cancel_cb(cancel_ctx)) {
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -210,6 +230,8 @@ esp_err_t llm_client_chat(const char *user_text, char *out_reply, size_t out_rep
         .data = (char *)calloc(1, LLM_RESPONSE_BUFFER_BYTES),
         .len = 0,
         .cap = LLM_RESPONSE_BUFFER_BYTES,
+        .cancel_cb = cancel_cb,
+        .cancel_ctx = cancel_ctx,
     };
     if (response.data == NULL) {
         free(request_body);
@@ -241,6 +263,9 @@ esp_err_t llm_client_chat(const char *user_text, char *out_reply, size_t out_rep
 
     ESP_LOGI(TAG, "POST %s model=%s", api_config_get_llm_url(), api_config_get_llm_model());
     esp_err_t err = esp_http_client_perform(client);
+    if (cancel_cb != NULL && cancel_cb(cancel_ctx)) {
+        err = ESP_ERR_INVALID_STATE;
+    }
     int status_code = esp_http_client_get_status_code(client);
 
     if (err == ESP_OK) {

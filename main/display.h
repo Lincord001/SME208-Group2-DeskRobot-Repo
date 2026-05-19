@@ -51,6 +51,7 @@ display_state_t display_get_state(void);
 void display_set_low_power_overlay(bool enable);
 void display_set_panel_power(bool enable);
 void display_set_error(void);
+void display_set_error_detail(const char *title, const char *detail);
 
 #ifdef __cplusplus
 }

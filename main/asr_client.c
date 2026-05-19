@@ -22,7 +22,8 @@
 
 #define ASR_TARGET_SAMPLE_RATE_HZ 16000
 #define ASR_CHUNK_BYTES           3200
-#define ASR_EVENT_TIMEOUT_MS      30000
+#define ASR_EVENT_TIMEOUT_MS      25000
+#define ASR_CANCEL_POLL_MS        100
 #define ASR_SEND_TIMEOUT_TICKS    pdMS_TO_TICKS(5000)
 #define ASR_WS_BUFFER_SIZE        4096
 #define ASR_WS_TASK_STACK         4096
@@ -33,7 +34,93 @@ typedef struct {
     EventGroupHandle_t events;
     char *out_text;
     size_t out_text_len;
+    char *message_buf;
+    size_t message_len;
+    size_t message_cap;
+    bool (*cancel_cb)(void *ctx);
+    void *cancel_ctx;
 } asr_session_t;
+
+static bool asr_is_canceled(const asr_session_t *session)
+{
+    return session != NULL &&
+           session->cancel_cb != NULL &&
+           session->cancel_cb(session->cancel_ctx);
+}
+
+static EventBits_t asr_wait_bits(asr_session_t *session,
+                                 EventBits_t bits_to_wait_for,
+                                 uint32_t timeout_ms)
+{
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
+    EventBits_t bits = 0;
+
+    do {
+        if (asr_is_canceled(session)) {
+            xEventGroupSetBits(session->events, ASR_ERROR_BIT);
+            return ASR_ERROR_BIT;
+        }
+
+        bits = xEventGroupWaitBits(session->events,
+                                   bits_to_wait_for,
+                                   pdFALSE,
+                                   pdFALSE,
+                                   pdMS_TO_TICKS(ASR_CANCEL_POLL_MS));
+        if ((bits & bits_to_wait_for) != 0) {
+            return bits;
+        }
+    } while ((int32_t)(deadline - xTaskGetTickCount()) > 0);
+
+    return bits;
+}
+
+static esp_err_t asr_accumulate_message(asr_session_t *session,
+                                        const esp_websocket_event_data_t *data,
+                                        char **out_message)
+{
+    *out_message = NULL;
+
+    if (data->payload_len <= 0 || data->data_len <= 0 || data->data_ptr == NULL) {
+        return ESP_OK;
+    }
+
+    if (data->payload_offset == 0) {
+        free(session->message_buf);
+        session->message_buf = NULL;
+        session->message_len = 0;
+        session->message_cap = (size_t)data->payload_len + 1;
+        session->message_buf = (char *)heap_caps_calloc(1,
+                                                        session->message_cap,
+                                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (session->message_buf == NULL) {
+            session->message_buf = (char *)calloc(1, session->message_cap);
+        }
+        if (session->message_buf == NULL) {
+            session->message_cap = 0;
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
+    if (session->message_buf == NULL ||
+        (size_t)data->payload_offset + (size_t)data->data_len >= session->message_cap) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    memcpy(session->message_buf + data->payload_offset,
+           data->data_ptr,
+           (size_t)data->data_len);
+    session->message_len += (size_t)data->data_len;
+
+    if (data->fin && session->message_len >= (size_t)data->payload_len) {
+        session->message_buf[data->payload_len] = '\0';
+        *out_message = session->message_buf;
+        session->message_buf = NULL;
+        session->message_len = 0;
+        session->message_cap = 0;
+    }
+
+    return ESP_OK;
+}
 
 static const cJSON *asr_find_string_item(const cJSON *root, const char *key)
 {
@@ -241,17 +328,22 @@ static void asr_ws_event_handler(void *handler_args,
         if (data->data_ptr == NULL || data->data_len <= 0 || data->op_code != 0x1) {
             break;
         }
-
-        char *message = (char *)heap_caps_calloc(1, (size_t)data->data_len + 1,
-                                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (message == NULL) {
-            message = (char *)calloc(1, (size_t)data->data_len + 1);
-        }
-        if (message == NULL) {
+        if (asr_is_canceled(session)) {
             xEventGroupSetBits(session->events, ASR_ERROR_BIT);
             break;
         }
-        memcpy(message, data->data_ptr, (size_t)data->data_len);
+
+        char *message = NULL;
+        esp_err_t err = asr_accumulate_message(session, data, &message);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to accumulate ASR message: %s", esp_err_to_name(err));
+            xEventGroupSetBits(session->events, ASR_ERROR_BIT);
+            break;
+        }
+
+        if (message == NULL) {
+            break;
+        }
 
         cJSON *root = cJSON_Parse(message);
         if (root != NULL) {
@@ -295,23 +387,46 @@ static void asr_ws_event_handler(void *handler_args,
     }
 }
 
-static size_t asr_downsample_24k_to_16k(const int16_t *src,
-                                        size_t src_samples,
-                                        int16_t *dst,
-                                        size_t dst_capacity)
+static size_t asr_resample_linear_to_16k(const int16_t *src,
+                                         size_t src_samples,
+                                         uint32_t src_rate_hz,
+                                         int16_t *dst,
+                                         size_t dst_capacity)
 {
-    size_t out = 0;
-    for (size_t i = 0; i + 2 < src_samples && out + 1 < dst_capacity; i += 3) {
-        dst[out++] = src[i];
-        dst[out++] = src[i + 2];
+    if (src == NULL || dst == NULL || src_rate_hz == 0 || src_samples == 0) {
+        return 0;
     }
-    return out;
+
+    size_t out_samples = ((uint64_t)src_samples * ASR_TARGET_SAMPLE_RATE_HZ) /
+                         src_rate_hz;
+    if (out_samples > dst_capacity) {
+        out_samples = dst_capacity;
+    }
+
+    for (size_t out = 0; out < out_samples; ++out) {
+        uint64_t src_pos_num = (uint64_t)out * src_rate_hz;
+        size_t src_idx = (size_t)(src_pos_num / ASR_TARGET_SAMPLE_RATE_HZ);
+        uint32_t frac = (uint32_t)(src_pos_num % ASR_TARGET_SAMPLE_RATE_HZ);
+
+        if (src_idx + 1 >= src_samples) {
+            dst[out] = src[src_samples - 1];
+            continue;
+        }
+
+        int32_t a = src[src_idx];
+        int32_t b = src[src_idx + 1];
+        dst[out] = (int16_t)(a + (((b - a) * (int32_t)frac) /
+                                  ASR_TARGET_SAMPLE_RATE_HZ));
+    }
+
+    return out_samples;
 }
 
 static esp_err_t asr_send_audio_from_pcm(esp_websocket_client_handle_t client,
                                          const int16_t *pcm,
                                          size_t sample_count,
-                                         uint32_t sample_rate_hz)
+                                         uint32_t sample_rate_hz,
+                                         asr_session_t *session)
 {
     const size_t input_chunk_samples = 2400; // 100 ms at 24 kHz
     int16_t *chunk16 = (int16_t *)heap_caps_malloc(ASR_CHUNK_BYTES,
@@ -325,6 +440,11 @@ static esp_err_t asr_send_audio_from_pcm(esp_websocket_client_handle_t client,
 
     esp_err_t err = ESP_OK;
     for (size_t pos = 0; pos < sample_count; pos += input_chunk_samples) {
+        if (asr_is_canceled(session)) {
+            err = ESP_ERR_INVALID_STATE;
+            break;
+        }
+
         size_t remaining = sample_count - pos;
         size_t take = remaining > input_chunk_samples ? input_chunk_samples : remaining;
         size_t out_samples = 0;
@@ -336,9 +456,9 @@ static esp_err_t asr_send_audio_from_pcm(esp_websocket_client_handle_t client,
             }
             memcpy(chunk16, &pcm[pos], out_samples * sizeof(int16_t));
         } else if (sample_rate_hz == 24000) {
-            out_samples = asr_downsample_24k_to_16k(&pcm[pos], take,
-                                                    chunk16,
-                                                    ASR_CHUNK_BYTES / sizeof(int16_t));
+            out_samples = asr_resample_linear_to_16k(&pcm[pos], take, sample_rate_hz,
+                                                     chunk16,
+                                                     ASR_CHUNK_BYTES / sizeof(int16_t));
         } else {
             ESP_LOGE(TAG, "Unsupported ASR input sample rate: %lu", (unsigned long)sample_rate_hz);
             err = ESP_ERR_NOT_SUPPORTED;
@@ -378,6 +498,23 @@ esp_err_t asr_client_recognize_pcm16(const int16_t *pcm,
                                      char *out_text,
                                      size_t out_text_len)
 {
+    return asr_client_recognize_pcm16_with_cancel(pcm,
+                                                  sample_count,
+                                                  sample_rate_hz,
+                                                  out_text,
+                                                  out_text_len,
+                                                  NULL,
+                                                  NULL);
+}
+
+esp_err_t asr_client_recognize_pcm16_with_cancel(const int16_t *pcm,
+                                                 size_t sample_count,
+                                                 uint32_t sample_rate_hz,
+                                                 char *out_text,
+                                                 size_t out_text_len,
+                                                 bool (*cancel_cb)(void *ctx),
+                                                 void *cancel_ctx)
+{
     if (pcm == NULL || sample_count == 0 || out_text == NULL || out_text_len == 0) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -398,6 +535,8 @@ esp_err_t asr_client_recognize_pcm16(const int16_t *pcm,
         .events = events,
         .out_text = out_text,
         .out_text_len = out_text_len,
+        .cancel_cb = cancel_cb,
+        .cancel_ctx = cancel_ctx,
     };
 
     char headers[192];
@@ -457,14 +596,12 @@ esp_err_t asr_client_recognize_pcm16(const int16_t *pcm,
         return err;
     }
 
-    EventBits_t bits = xEventGroupWaitBits(events,
-                                           ASR_CONNECTED_BIT | ASR_ERROR_BIT,
-                                           pdFALSE,
-                                           pdFALSE,
-                                           pdMS_TO_TICKS(ASR_EVENT_TIMEOUT_MS));
+    EventBits_t bits = asr_wait_bits(&session,
+                                     ASR_CONNECTED_BIT | ASR_ERROR_BIT,
+                                     ASR_EVENT_TIMEOUT_MS);
     if ((bits & ASR_CONNECTED_BIT) == 0) {
         ESP_LOGE(TAG, "ASR WebSocket connect timeout/error");
-        err = ESP_ERR_TIMEOUT;
+        err = asr_is_canceled(&session) ? ESP_ERR_INVALID_STATE : ESP_ERR_TIMEOUT;
         goto cleanup;
     }
 
@@ -475,7 +612,7 @@ esp_err_t asr_client_recognize_pcm16(const int16_t *pcm,
 
     vTaskDelay(pdMS_TO_TICKS(500));
 
-    err = asr_send_audio_from_pcm(client, pcm, sample_count, sample_rate_hz);
+    err = asr_send_audio_from_pcm(client, pcm, sample_count, sample_rate_hz, &session);
     if (err != ESP_OK) {
         goto cleanup;
     }
@@ -485,14 +622,12 @@ esp_err_t asr_client_recognize_pcm16(const int16_t *pcm,
         goto cleanup;
     }
 
-    bits = xEventGroupWaitBits(events,
-                               ASR_FINISHED_BIT | ASR_ERROR_BIT,
-                               pdFALSE,
-                               pdFALSE,
-                               pdMS_TO_TICKS(ASR_EVENT_TIMEOUT_MS));
+    bits = asr_wait_bits(&session,
+                         ASR_FINISHED_BIT | ASR_ERROR_BIT,
+                         ASR_EVENT_TIMEOUT_MS);
     if ((bits & ASR_FINISHED_BIT) == 0) {
         ESP_LOGE(TAG, "ASR session finish timeout/error");
-        err = ESP_ERR_TIMEOUT;
+        err = asr_is_canceled(&session) ? ESP_ERR_INVALID_STATE : ESP_ERR_TIMEOUT;
         goto cleanup;
     }
 
@@ -505,6 +640,7 @@ cleanup:
     esp_websocket_client_close(client, pdMS_TO_TICKS(1000));
     esp_websocket_client_stop(client);
     esp_websocket_client_destroy(client);
+    free(session.message_buf);
     vEventGroupDelete(events);
     return err;
 }

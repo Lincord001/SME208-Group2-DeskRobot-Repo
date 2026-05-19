@@ -32,7 +32,7 @@
 #endif
 
 #ifndef DASHSCOPE_HTTP_TIMEOUT_MS
-#define DASHSCOPE_HTTP_TIMEOUT_MS 90000
+#define DASHSCOPE_HTTP_TIMEOUT_MS 45000
 #endif
 
 const char *api_config_get_dashscope_api_key(void)
