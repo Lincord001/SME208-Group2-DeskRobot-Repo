@@ -23,6 +23,7 @@
 #define VOICE_ASR_TASK_STACK_SIZE 8192
 #define VOICE_TTS_TASK_STACK_SIZE 8192
 #define VOICE_FULL_TASK_STACK_SIZE 10240
+#define VOICE_TTS_SAMPLE_RATE_HZ 16000
 
 static const char *TAG = "voice_assistant";
 static TaskHandle_t s_llm_task;
@@ -85,6 +86,25 @@ static BaseType_t voice_assistant_create_task(TaskFunction_t task_func,
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     return created;
+}
+
+static void voice_assistant_show_tts_ready(audio_buffer_t *audio_buffer)
+{
+    audio_buffer_state_t audio_state = {0};
+    if (audio_buffer != NULL) {
+        audio_buffer_get_state(audio_buffer, &audio_state);
+    }
+
+    if (audio_state.playing) {
+        uint32_t current_sec = (uint32_t)(audio_state.current_read_pos /
+                                          VOICE_TTS_SAMPLE_RATE_HZ);
+        uint32_t total_sec = (uint32_t)((audio_state.recorded_size / sizeof(int16_t)) /
+                                        VOICE_TTS_SAMPLE_RATE_HZ);
+        display_set_answering(current_sec, total_sec);
+    } else {
+        display_set_idle();
+        display_set_status("Voice ready", "Press K2");
+    }
 }
 
 static void voice_assistant_llm_test_task(void *arg)
@@ -214,8 +234,7 @@ static void voice_assistant_tts_test_task(void *arg)
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "TTS test done, received %u audio bytes; press K2 to play when speaker is available",
                  (unsigned)audio_bytes);
-        display_set_idle();
-        display_set_status("Voice ready", "Press K2");
+        voice_assistant_show_tts_ready(audio_buffer);
     } else {
         ESP_LOGE(TAG, "TTS test failed: %s", esp_err_to_name(err));
         display_set_error();
@@ -317,8 +336,7 @@ static void voice_assistant_full_test_task(void *arg)
 
     ESP_LOGI(TAG, "Full voice test done, TTS audio bytes=%u; press K2 to play when speaker is available",
              (unsigned)tts_audio_bytes);
-    display_set_idle();
-    display_set_status("Voice ready", "Press K2");
+    voice_assistant_show_tts_ready(audio_buffer);
 
 done:
     if (servo_thinking_started) {

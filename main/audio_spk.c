@@ -20,6 +20,7 @@
 #include <driver/i2s_std.h>
 #include <esp_check.h>
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -30,6 +31,11 @@
 
 /* ── 音频参数 ──────────────────────────────────────────── */
 #define SPK_SAMPLE_RATE_HZ  24000
+#define SPK_TTS_PLAYBACK_RATE_HZ 12800
+#define SPK_STREAM_WAIT_MS  10
+#define SPK_STREAM_LOW_WATER_MS 300
+#define SPK_STREAM_HIGH_WATER_MS 1250
+#define SPK_MONITOR_INTERVAL_US 1000000
 #define SPK_DMA_FRAMES      512       // 每次 DMA 写出的帧数（16-bit × 512 = 1 KB）
 #define SPK_SILENCE_FLUSH_FRAMES 512  // 播放结束后额外发送的静音帧数
 #define SPK_STARTUP_SILENCE_FRAMES 128 // 播放开始前用于清空残留样本的静音帧数
@@ -46,6 +52,7 @@ static audio_buffer_t    *s_audio_buf;
 static TaskHandle_t       s_task_handle;
 static bool               s_initialized;
 static bool               s_tx_enabled;
+static uint32_t           s_sample_rate_hz = SPK_SAMPLE_RATE_HZ;
 static size_t             s_volume_level_idx = 2; // default 100%
 
 static inline int16_t audio_spk_apply_volume(int16_t sample)
@@ -71,6 +78,32 @@ static esp_err_t audio_spk_enable_tx_if_needed(void)
         s_tx_enabled = true;
     }
     return err;
+}
+
+static esp_err_t audio_spk_reconfig_clock(uint32_t sample_rate_hz)
+{
+    if (sample_rate_hz == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_sample_rate_hz == sample_rate_hz) {
+        return ESP_OK;
+    }
+    if (s_tx_enabled) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate_hz);
+    esp_err_t err = i2s_channel_reconfig_std_clock(s_tx_chan, &clk_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "reconfig TX sample rate %lu Hz failed: %s",
+                 (unsigned long)sample_rate_hz,
+                 esp_err_to_name(err));
+        return err;
+    }
+
+    s_sample_rate_hz = sample_rate_hz;
+    ESP_LOGI(TAG, "TX sample rate set to %lu Hz", (unsigned long)s_sample_rate_hz);
+    return ESP_OK;
 }
 
 static void audio_spk_prime_tx_with_silence(void)
@@ -115,6 +148,22 @@ static void audio_spk_flush_and_disable_tx(void)
     s_tx_enabled = false;
 }
 
+static esp_err_t audio_spk_write_stream_gap(void)
+{
+    static int16_t silence_buf[SPK_DMA_FRAMES];
+    size_t bytes_written = 0;
+
+    memset(silence_buf, 0, sizeof(silence_buf));
+    return i2s_channel_write(s_tx_chan, silence_buf, sizeof(silence_buf),
+                             &bytes_written, portMAX_DELAY);
+}
+
+static uint32_t audio_spk_samples_to_ms(size_t samples)
+{
+    uint32_t sample_rate_hz = s_sample_rate_hz > 0 ? s_sample_rate_hz : SPK_SAMPLE_RATE_HZ;
+    return (uint32_t)((samples * 1000U) / sample_rate_hz);
+}
+
 /* ── 播放任务 ─────────────────────────────────────────── */
 static void spk_task(void *arg)
 {
@@ -132,7 +181,7 @@ static void spk_task(void *arg)
         }
 
         /* 检查是否有可播放的录音数据 */
-        if (!state.recording_complete || state.recorded_size == 0) {
+        if (state.recorded_size == 0) {
             ESP_LOGW(TAG, "No recorded data to play");
             audio_buffer_lock(s_audio_buf);
             s_audio_buf->playing = false;
@@ -143,7 +192,7 @@ static void spk_task(void *arg)
         /* 重置读指针，开始播放 */
         audio_buffer_lock(s_audio_buf);
         s_audio_buf->current_read_pos = 0;
-        size_t total_samples = s_audio_buf->recorded_size / sizeof(int16_t);
+        size_t available_samples = s_audio_buf->recorded_size / sizeof(int16_t);
         audio_buffer_unlock(s_audio_buf);
 
         if (audio_spk_enable_tx_if_needed() != ESP_OK) {
@@ -167,7 +216,13 @@ static void spk_task(void *arg)
                      esp_err_to_name(motion_err));
         }
 
-        ESP_LOGI(TAG, "Playback started, %u samples", (unsigned)total_samples);
+        bool stream_buffering = false;
+        int64_t playback_start_us = esp_timer_get_time();
+        int64_t last_monitor_us = playback_start_us;
+
+        ESP_LOGI(TAG, "Playback started, initial=%u samples, streaming=%u",
+                 (unsigned)available_samples,
+                 state.recording_complete ? 0U : 1U);
 
         while (1) {
             audio_buffer_get_state(s_audio_buf, &state);
@@ -176,7 +231,66 @@ static void spk_task(void *arg)
             }
 
             size_t read_pos = state.current_read_pos;
-            if (read_pos >= total_samples) {
+            available_samples = state.recorded_size / sizeof(int16_t);
+            size_t buffered_samples =
+                available_samples > read_pos ? available_samples - read_pos : 0;
+            int64_t now_us = esp_timer_get_time();
+            if (now_us - last_monitor_us >= SPK_MONITOR_INTERVAL_US) {
+                ESP_LOGI(TAG,
+                         "VOICE_MON SPK elapsed=%ums played=%ums buffered=%ums read=%u available=%u streaming=%u buffering=%u complete=%u",
+                         (unsigned)((now_us - playback_start_us) / 1000),
+                         (unsigned)audio_spk_samples_to_ms(read_pos),
+                         (unsigned)audio_spk_samples_to_ms(buffered_samples),
+                         (unsigned)read_pos,
+                         (unsigned)available_samples,
+                         state.recording_complete ? 0U : 1U,
+                         stream_buffering ? 1U : 0U,
+                         state.recording_complete ? 1U : 0U);
+                last_monitor_us = now_us;
+            }
+
+            if (!state.recording_complete) {
+                if (stream_buffering) {
+                    if (audio_spk_samples_to_ms(buffered_samples) < SPK_STREAM_HIGH_WATER_MS) {
+                        esp_err_t gap_err = audio_spk_write_stream_gap();
+                        if (gap_err != ESP_OK) {
+                            ESP_LOGW(TAG, "stream refill silence failed: %s",
+                                     esp_err_to_name(gap_err));
+                            vTaskDelay(pdMS_TO_TICKS(SPK_STREAM_WAIT_MS));
+                        }
+                        continue;
+                    }
+
+                    stream_buffering = false;
+                    ESP_LOGI(TAG, "VOICE_MON SPK buffer_resume buffered=%ums samples=%u",
+                             (unsigned)audio_spk_samples_to_ms(buffered_samples),
+                             (unsigned)buffered_samples);
+                } else if (audio_spk_samples_to_ms(buffered_samples) < SPK_STREAM_LOW_WATER_MS) {
+                    stream_buffering = true;
+                    ESP_LOGI(TAG, "VOICE_MON SPK buffer_low buffered=%ums samples=%u",
+                             (unsigned)audio_spk_samples_to_ms(buffered_samples),
+                             (unsigned)buffered_samples);
+                    esp_err_t gap_err = audio_spk_write_stream_gap();
+                    if (gap_err != ESP_OK) {
+                        ESP_LOGW(TAG, "stream low-water silence failed: %s",
+                                 esp_err_to_name(gap_err));
+                        vTaskDelay(pdMS_TO_TICKS(SPK_STREAM_WAIT_MS));
+                    }
+                    continue;
+                }
+            }
+
+            if (read_pos >= available_samples) {
+                if (!state.recording_complete) {
+                    esp_err_t gap_err = audio_spk_write_stream_gap();
+                    if (gap_err != ESP_OK) {
+                        ESP_LOGW(TAG, "stream gap silence failed: %s",
+                                 esp_err_to_name(gap_err));
+                        vTaskDelay(pdMS_TO_TICKS(SPK_STREAM_WAIT_MS));
+                    }
+                    continue;
+                }
+
                 /* 播完一遍，停止 */
                 audio_buffer_lock(s_audio_buf);
                 s_audio_buf->playing = false;
@@ -186,7 +300,7 @@ static void spk_task(void *arg)
             }
 
             /* 填充 DMA 发送缓冲区 */
-            size_t chunk = total_samples - read_pos;
+            size_t chunk = buffered_samples;
             if (chunk > SPK_DMA_FRAMES) chunk = SPK_DMA_FRAMES;
 
             for (size_t i = 0; i < chunk; ++i) {
@@ -283,6 +397,21 @@ esp_err_t audio_spk_init(audio_buffer_t *audio_buffer)
     return ESP_OK;
 }
 
+esp_err_t audio_spk_set_sample_rate(uint32_t sample_rate_hz)
+{
+    if (!s_initialized || s_audio_buf == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    audio_buffer_state_t state = {0};
+    audio_buffer_get_state(s_audio_buf, &state);
+    if (state.playing) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    return audio_spk_reconfig_clock(sample_rate_hz);
+}
+
 esp_err_t audio_spk_set_playing(bool enable)
 {
     if (!s_initialized || s_audio_buf == NULL) {
@@ -294,7 +423,7 @@ esp_err_t audio_spk_set_playing(bool enable)
         bool still_recording = false;
 
         audio_buffer_lock(s_audio_buf);
-        if (!s_audio_buf->recording_complete || s_audio_buf->recorded_size == 0) {
+        if (s_audio_buf->recorded_size == 0) {
             no_recording_available = true;
         } else if (s_audio_buf->recording) {
             still_recording = true;

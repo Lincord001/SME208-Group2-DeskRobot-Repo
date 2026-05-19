@@ -9,6 +9,7 @@
  */
 
 #include "audio_mic.h"
+#include "audio_spk.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -58,6 +59,7 @@ static void mic_task(void *arg)
     uint64_t level_sum = 0;
     uint32_t level_samples = 0;
     TickType_t last_level_log_tick = xTaskGetTickCount();
+    bool was_recording = false;
 
     while (1) {
         size_t bytes_read = 0;
@@ -72,7 +74,8 @@ static void mic_task(void *arg)
         bool finalized_recording = false;
         size_t finalized_size = 0;
         audio_buffer_lock(s_audio_buf);
-        if (!s_audio_buf->recording &&
+        if (was_recording &&
+            !s_audio_buf->recording &&
             s_audio_buf->current_write_pos > 0 &&
             !s_audio_buf->recording_complete) {
             s_audio_buf->recorded_size =
@@ -85,6 +88,7 @@ static void mic_task(void *arg)
         size_t write_pos = s_audio_buf->current_write_pos;
         size_t total_size = s_audio_buf->total_size;
         audio_buffer_unlock(s_audio_buf);
+        was_recording = recording;
         if (finalized_recording) {
             ESP_LOGI(TAG, "Recording stopped, %u bytes saved",
                      (unsigned)finalized_size);
@@ -224,6 +228,8 @@ void audio_mic_set_recording(bool enable)
     if (!s_initialized || s_audio_buf == NULL) return;
 
     if (enable) {
+        (void)audio_spk_set_sample_rate(MIC_SAMPLE_RATE_HZ);
+
         audio_buffer_lock(s_audio_buf);
         /* 重置缓冲区写指针，开始新录音 */
         s_audio_buf->current_write_pos  = 0;

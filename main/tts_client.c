@@ -9,12 +9,14 @@
 #include <esp_crt_bundle.h>
 #include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <esp_websocket_client.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
 #include <mbedtls/base64.h>
 
 #include "api_config.h"
+#include "audio_spk.h"
 
 #define TTS_CONNECTED_BIT BIT0
 #define TTS_FINISHED_BIT  BIT1
@@ -24,6 +26,10 @@
 #define TTS_SEND_TIMEOUT_TICKS pdMS_TO_TICKS(5000)
 #define TTS_WS_BUFFER_SIZE     4096
 #define TTS_WS_TASK_STACK      4096
+#define TTS_SAMPLE_RATE_HZ     16000
+#define TTS_PLAYBACK_RATE_HZ   TTS_SAMPLE_RATE_HZ
+#define TTS_STREAM_START_BYTES (TTS_SAMPLE_RATE_HZ * sizeof(int16_t))
+#define TTS_MONITOR_INTERVAL_US 1000000
 
 static const char *TAG = "tts_client";
 
@@ -36,6 +42,12 @@ typedef struct {
     size_t message_cap;
     audio_buffer_t *audio_buffer;
     bool buffer_overflow;
+    bool stream_playback_started;
+    bool stream_playback_failed;
+    int64_t request_start_us;
+    int64_t first_audio_us;
+    int64_t last_monitor_us;
+    size_t last_monitor_bytes;
 } tts_session_t;
 
 static esp_err_t tts_accumulate_message(tts_session_t *session,
@@ -113,7 +125,7 @@ static esp_err_t tts_send_session_update(esp_websocket_client_handle_t client)
     cJSON_AddStringToObject(session, "voice", api_config_get_tts_voice());
     cJSON_AddStringToObject(session, "language_type", "Auto");
     cJSON_AddStringToObject(session, "response_format", "pcm");
-    cJSON_AddNumberToObject(session, "sample_rate", 24000);
+    cJSON_AddNumberToObject(session, "sample_rate", TTS_SAMPLE_RATE_HZ);
     cJSON_AddItemToObject(root, "session", session);
 
     esp_err_t err = tts_ws_send_json(client, root);
@@ -175,8 +187,87 @@ static void tts_write_audio_to_buffer(tts_session_t *session,
         audio_buffer_lock(audio_buffer);
         audio_buffer->current_write_pos += len / sizeof(int16_t);
         audio_buffer->recorded_size = audio_buffer->current_write_pos * sizeof(int16_t);
+        size_t recorded_size = audio_buffer->recorded_size;
         audio_buffer_unlock(audio_buffer);
+
+        if (!session->stream_playback_started &&
+            !session->stream_playback_failed &&
+            recorded_size >= TTS_STREAM_START_BYTES) {
+            esp_err_t rate_err = audio_spk_set_sample_rate(TTS_PLAYBACK_RATE_HZ);
+            if (rate_err != ESP_OK) {
+                session->stream_playback_failed = true;
+                ESP_LOGW(TAG, "TTS playback sample-rate set rejected: %s",
+                         esp_err_to_name(rate_err));
+                return;
+            }
+
+            esp_err_t err = audio_spk_set_playing(true);
+            if (err == ESP_OK) {
+                session->stream_playback_started = true;
+                ESP_LOGI(TAG, "VOICE_MON TTS playback_start buffered=%ums bytes=%u",
+                         (unsigned)((recorded_size * 1000U) /
+                                    (TTS_SAMPLE_RATE_HZ * sizeof(int16_t))),
+                         (unsigned)recorded_size);
+            } else {
+                session->stream_playback_failed = true;
+                ESP_LOGW(TAG, "TTS streaming playback start rejected: %s",
+                         esp_err_to_name(err));
+            }
+        }
     }
+}
+
+static void tts_monitor_audio_delta(tts_session_t *session, size_t delta_len)
+{
+    int64_t now_us = esp_timer_get_time();
+
+    if (session->first_audio_us == 0) {
+        session->first_audio_us = now_us;
+        session->last_monitor_us = now_us;
+        session->last_monitor_bytes = session->audio_bytes;
+        ESP_LOGI(TAG, "VOICE_MON TTS first_audio latency=%lldms first_bytes=%u",
+                 (long long)((now_us - session->request_start_us) / 1000),
+                 (unsigned)delta_len);
+        return;
+    }
+
+    if (now_us - session->last_monitor_us < TTS_MONITOR_INTERVAL_US) {
+        return;
+    }
+
+    size_t interval_bytes = session->audio_bytes - session->last_monitor_bytes;
+    uint32_t interval_ms = (uint32_t)((now_us - session->last_monitor_us) / 1000);
+    uint32_t rate_bps = interval_ms > 0 ?
+        (uint32_t)((interval_bytes * 1000U) / interval_ms) : 0;
+    uint32_t audio_ms = (uint32_t)((session->audio_bytes * 1000U) /
+                                   (TTS_SAMPLE_RATE_HZ * sizeof(int16_t)));
+    uint32_t elapsed_ms = (uint32_t)((now_us - session->request_start_us) / 1000);
+
+    audio_buffer_state_t state = {0};
+    uint32_t buffered_ms = 0;
+    if (session->audio_buffer != NULL) {
+        audio_buffer_get_state(session->audio_buffer, &state);
+        size_t written_samples = state.recorded_size / sizeof(int16_t);
+        size_t read_samples = state.current_read_pos;
+        if (written_samples > read_samples) {
+            buffered_ms = (uint32_t)(((written_samples - read_samples) * 1000U) /
+                                     TTS_SAMPLE_RATE_HZ);
+        }
+    }
+
+    ESP_LOGI(TAG,
+             "VOICE_MON TTS elapsed=%ums chunks=%u bytes=%u audio=%ums rate=%uBps buffered=%ums playing=%u complete=%u",
+             (unsigned)elapsed_ms,
+             (unsigned)session->audio_chunks,
+             (unsigned)session->audio_bytes,
+             (unsigned)audio_ms,
+             (unsigned)rate_bps,
+             (unsigned)buffered_ms,
+             state.playing ? 1U : 0U,
+             state.recording_complete ? 1U : 0U);
+
+    session->last_monitor_us = now_us;
+    session->last_monitor_bytes = session->audio_bytes;
 }
 
 static esp_err_t tts_count_audio_delta_b64(tts_session_t *session,
@@ -212,6 +303,7 @@ static esp_err_t tts_count_audio_delta_b64(tts_session_t *session,
     tts_write_audio_to_buffer(session, raw, raw_len);
     session->audio_bytes += raw_len;
     session->audio_chunks++;
+    tts_monitor_audio_delta(session, raw_len);
     free(raw);
 
     if ((session->audio_chunks % 10) == 0) {
@@ -401,6 +493,7 @@ esp_err_t tts_client_synthesize_to_audio_buffer(const char *text,
     tts_session_t session = {
         .events = events,
         .audio_buffer = audio_buffer,
+        .request_start_us = esp_timer_get_time(),
     };
 
     char headers[160];
@@ -459,8 +552,6 @@ esp_err_t tts_client_synthesize_to_audio_buffer(const char *text,
         goto cleanup;
     }
 
-    vTaskDelay(pdMS_TO_TICKS(500));
-
     err = tts_send_text_append(client, text);
     if (err != ESP_OK) {
         goto cleanup;
@@ -499,16 +590,54 @@ esp_err_t tts_client_synthesize_to_audio_buffer(const char *text,
         ESP_LOGI(TAG, "TTS audio total: chunks=%u bytes=%u",
                  (unsigned)session.audio_chunks,
                  (unsigned)session.audio_bytes);
+        int64_t now_us = esp_timer_get_time();
+        uint32_t elapsed_ms = (uint32_t)((now_us - session.request_start_us) / 1000);
+        uint32_t audio_ms = (uint32_t)((session.audio_bytes * 1000U) /
+                                       (TTS_SAMPLE_RATE_HZ * sizeof(int16_t)));
+        uint32_t avg_rate_bps = elapsed_ms > 0 ?
+            (uint32_t)((session.audio_bytes * 1000U) / elapsed_ms) : 0;
+        ESP_LOGI(TAG,
+                 "VOICE_MON TTS final elapsed=%ums audio=%ums chunks=%u bytes=%u avg_rate=%uBps realtime=%u%%",
+                 (unsigned)elapsed_ms,
+                 (unsigned)audio_ms,
+                 (unsigned)session.audio_chunks,
+                 (unsigned)session.audio_bytes,
+                 (unsigned)avg_rate_bps,
+                 avg_rate_bps > 0 ? (unsigned)((avg_rate_bps * 100U) /
+                                               (TTS_SAMPLE_RATE_HZ * sizeof(int16_t))) : 0U);
     }
 
     if (audio_buffer != NULL && session.audio_bytes > 0) {
         audio_buffer_lock(audio_buffer);
+        bool was_playing = audio_buffer->playing;
         audio_buffer->recording_complete = true;
-        audio_buffer->current_read_pos = 0;
+        if (!was_playing) {
+            audio_buffer->current_read_pos = 0;
+        }
         size_t recorded_size = audio_buffer->recorded_size;
         audio_buffer_unlock(audio_buffer);
         ESP_LOGI(TAG, "TTS PCM stored to audio buffer: %u bytes",
                  (unsigned)recorded_size);
+
+        if (!session.stream_playback_started &&
+            !session.stream_playback_failed &&
+            !was_playing) {
+            esp_err_t rate_err = audio_spk_set_sample_rate(TTS_PLAYBACK_RATE_HZ);
+            if (rate_err != ESP_OK) {
+                ESP_LOGW(TAG, "TTS final playback sample-rate set rejected: %s",
+                         esp_err_to_name(rate_err));
+                goto cleanup;
+            }
+
+            esp_err_t play_err = audio_spk_set_playing(true);
+            if (play_err == ESP_OK) {
+                session.stream_playback_started = true;
+                ESP_LOGI(TAG, "TTS playback started after final audio");
+            } else {
+                ESP_LOGW(TAG, "TTS final playback start rejected: %s",
+                         esp_err_to_name(play_err));
+            }
+        }
     }
 
 cleanup:

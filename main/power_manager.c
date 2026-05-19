@@ -16,8 +16,8 @@
 #include "servo.h"
 #include "wifi_network.h"
 
-#define POWER_STAGE1_IDLE_MS 10000
-#define POWER_STAGE2_IDLE_MS 20000
+#define POWER_STAGE1_IDLE_MS 30000
+#define POWER_STAGE2_IDLE_MS 60000
 #define POWER_IDLE_TIMEOUT_MIN_MS 1000
 #define POWER_TASK_STACK     3072
 #define POWER_TASK_PRIO      3

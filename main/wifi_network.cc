@@ -36,6 +36,24 @@ static char s_status[32] = "WiFi init";
 
 static void wifi_network_start_station_task(void *arg);
 
+static void wifi_network_apply_realtime_station_config(void)
+{
+    esp_err_t err = esp_wifi_set_ps(WIFI_PS_NONE);
+    if (err == ESP_OK) {
+        s_power_save_enabled = false;
+        ESP_LOGI(TAG, "WiFi power save disabled for realtime audio");
+    } else {
+        ESP_LOGW(TAG, "Disable WiFi power save failed: %s", esp_err_to_name(err));
+    }
+
+    err = esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT40);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "WiFi STA bandwidth requested: HT40");
+    } else {
+        ESP_LOGW(TAG, "WiFi STA HT40 request failed: %s", esp_err_to_name(err));
+    }
+}
+
 static void wifi_network_start_time_sync(void)
 {
     setenv("TZ", CLOCK_TIMEZONE, 1);
@@ -100,6 +118,7 @@ static void wifi_network_event_handler(WifiEvent event, const std::string& data)
         s_connected = true;
         auto& wifi = WifiManager::GetInstance();
         wifi_network_set_status("connected");
+        wifi_network_apply_realtime_station_config();
         wifi_network_start_time_sync();
         ESP_LOGI(TAG, "WiFi connected: SSID=%s IP=%s RSSI=%d",
                  data.c_str(),
