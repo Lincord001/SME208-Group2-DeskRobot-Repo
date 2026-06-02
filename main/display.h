@@ -22,6 +22,7 @@ typedef enum {
     DISPLAY_STATE_USAGE_GUIDE,
     DISPLAY_STATE_CLOCK,
     DISPLAY_STATE_CINNAMOROLL,
+    DISPLAY_STATE_GAME,
     DISPLAY_STATE_ERROR,
 } display_state_t;
 
@@ -47,6 +48,8 @@ void display_set_usage_guide_mode(bool enable);
 void display_set_wifi_status(const char *status);
 void display_set_clock_mode(bool enable);
 void display_set_cinnamoroll_mode(bool enable);
+void display_set_game_mode(bool enable);
+void display_game_jump(void);
 display_state_t display_get_state(void);
 void display_set_low_power_overlay(bool enable);
 void display_set_panel_power(bool enable);

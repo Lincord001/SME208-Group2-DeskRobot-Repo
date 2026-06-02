@@ -43,8 +43,17 @@
 #define DISPLAY_WIFI_CONNECTED_HOLD_SEC 5
 #define DISPLAY_CINNA_BLINK_PERIOD_FRAMES 8
 #define DISPLAY_CINNA_TWINKLE_PERIOD_FRAMES 16
+#define DISPLAY_CINNA_STAGE2_UPDATE_MS 50
+#define DISPLAY_CINNA_STAGE2_PERIOD_MS 2000
+#define DISPLAY_CINNA_STAGE2_FRAME2_MS 1000
 #define DISPLAY_CINNA_LEFT_EYE_ARC_PIXELS  5
 #define DISPLAY_CINNA_RIGHT_EYE_ARC_PIXELS 4
+#define DISPLAY_GAME_UPDATE_MS 50
+#define DISPLAY_GAME_GROUND_Y 55
+#define DISPLAY_GAME_PLAYER_X 12
+#define DISPLAY_GAME_PLAYER_W 8
+#define DISPLAY_GAME_PLAYER_H 12
+#define DISPLAY_GAME_OBSTACLE_COUNT 3
 
 #define SSD1306_CMD_SEG_REMAP_NORMAL   0xA0
 #define SSD1306_CMD_SEG_REMAP_REVERSE  0xA1
@@ -90,12 +99,31 @@ typedef enum {
     DISPLAY_CINNA_DECOR_COUNT,
 } display_cinnamoroll_decor_t;
 
+typedef struct {
+    int x;
+    int w;
+    int h;
+} display_game_obstacle_t;
+
+typedef struct {
+    int player_y;
+    int velocity_y;
+    uint8_t jumps_used;
+    uint32_t score;
+    uint32_t rng;
+    bool active;
+    bool game_over;
+    display_game_obstacle_t obstacles[DISPLAY_GAME_OBSTACLE_COUNT];
+} display_game_state_t;
+
 static SemaphoreHandle_t s_state_mutex;
 static TaskHandle_t s_task_handle;
 static bool s_initialized;
 static bool s_task_started;
 static volatile bool s_low_power_overlay;
 static volatile bool s_panel_powered = true;
+static volatile bool s_cinnamoroll_stage2_blink_animation;
+static volatile TickType_t s_cinnamoroll_stage2_start_tick;
 
 static i2c_master_bus_handle_t s_i2c_bus;
 static esp_lcd_panel_io_handle_t s_panel_io;
@@ -116,6 +144,9 @@ static lv_obj_t *s_cinna_eye_cover_r;
 static lv_obj_t *s_cinna_eye_arc_l[DISPLAY_CINNA_LEFT_EYE_ARC_PIXELS];
 static lv_obj_t *s_cinna_eye_arc_r[DISPLAY_CINNA_RIGHT_EYE_ARC_PIXELS];
 static lv_obj_t *s_cinna_decor_covers[DISPLAY_CINNA_DECOR_COUNT];
+static lv_obj_t *s_game_player;
+static lv_obj_t *s_game_ground;
+static lv_obj_t *s_game_obstacles[DISPLAY_GAME_OBSTACLE_COUNT];
 static uint8_t s_i2c_hw_addr = DISPLAY_I2C_HW_ADDR;
 
 static const audio_buffer_t *s_audio_buf;
@@ -123,10 +154,12 @@ static uint32_t s_audio_sample_rate_hz;
 static display_status_t s_status = {
     .state = DISPLAY_STATE_IDLE,
 };
+static display_game_state_t s_game;
 
 static void display_set_visible(lv_obj_t *obj, bool visible);
 static void display_set_inverted_theme(bool inverted);
 static void display_hide_motion_objects(void);
+static void display_game_reset(void);
 
 static uint32_t display_elapsed_from_start(const display_status_t *status)
 {
@@ -334,6 +367,11 @@ static void display_format_text(const display_status_t *status,
         detail[0] = '\0';
         break;
 
+    case DISPLAY_STATE_GAME:
+        title[0] = '\0';
+        detail[0] = '\0';
+        break;
+
     case DISPLAY_STATE_ERROR:
         snprintf(title, title_size, "%s",
                  status->status_title[0] != '\0' ? status->status_title : "Error");
@@ -448,6 +486,11 @@ static void display_hide_motion_objects(void)
     for (size_t i = 0; i < DISPLAY_CINNA_DECOR_COUNT; ++i) {
         display_set_visible(s_cinna_decor_covers[i], false);
     }
+    display_set_visible(s_game_player, false);
+    display_set_visible(s_game_ground, false);
+    for (size_t i = 0; i < DISPLAY_GAME_OBSTACLE_COUNT; ++i) {
+        display_set_visible(s_game_obstacles[i], false);
+    }
     for (size_t i = 0; i < 3; ++i) {
         display_set_visible(s_dots[i], false);
     }
@@ -470,6 +513,28 @@ static bool display_cinnamoroll_blink_closed(uint32_t frame)
 {
     uint32_t phase = frame % DISPLAY_CINNA_BLINK_PERIOD_FRAMES;
     return phase == 0 || phase == 2;
+}
+
+static uint32_t display_cinnamoroll_stage2_frame(void)
+{
+    TickType_t start_tick = s_cinnamoroll_stage2_start_tick;
+    TickType_t now = xTaskGetTickCount();
+    uint32_t elapsed_ms = pdTICKS_TO_MS(now - start_tick);
+    uint32_t phase = elapsed_ms % DISPLAY_CINNA_STAGE2_PERIOD_MS;
+    uint32_t short_window_ms = DISPLAY_CINNA_STAGE2_PERIOD_MS -
+                               DISPLAY_CINNA_STAGE2_FRAME2_MS;
+    uint32_t short_frame_ms = short_window_ms / 3U;
+
+    if (phase < short_frame_ms) {
+        return 0;
+    }
+    if (phase < short_frame_ms * 2U) {
+        return 1;
+    }
+    if (phase < short_frame_ms * 2U + DISPLAY_CINNA_STAGE2_FRAME2_MS) {
+        return 2;
+    }
+    return 3;
 }
 
 static void display_set_cinnamoroll_twinkle(uint32_t frame)
@@ -535,6 +600,143 @@ static void display_set_cinnamoroll_blink(bool closed)
     }
     for (size_t i = 0; i < DISPLAY_CINNA_RIGHT_EYE_ARC_PIXELS; ++i) {
         lv_obj_move_foreground(s_cinna_eye_arc_r[i]);
+    }
+}
+
+static uint32_t display_game_next_random(void)
+{
+    s_game.rng = s_game.rng * 1103515245U + 12345U;
+    return s_game.rng;
+}
+
+static void display_game_place_obstacle(size_t index, int base_x)
+{
+    static const int widths[3] = {8, 11, 14};
+    static const int heights[3] = {10, 16, 22};
+    uint32_t value = display_game_next_random();
+    size_t size = (value >> 8) % 3U;
+
+    s_game.obstacles[index].x = base_x + (int)(value % 22U);
+    s_game.obstacles[index].w = widths[size];
+    s_game.obstacles[index].h = heights[size];
+}
+
+static void display_game_reset(void)
+{
+    s_game.active = true;
+    s_game.game_over = false;
+    s_game.player_y = DISPLAY_GAME_GROUND_Y - DISPLAY_GAME_PLAYER_H;
+    s_game.velocity_y = 0;
+    s_game.jumps_used = 0;
+    s_game.score = 0;
+    s_game.rng = (uint32_t)xTaskGetTickCount();
+    if (s_game.rng == 0) {
+        s_game.rng = 1;
+    }
+
+    for (size_t i = 0; i < DISPLAY_GAME_OBSTACLE_COUNT; ++i) {
+        display_game_place_obstacle(i, DISPLAY_H_RES + 36 + (int)i * 48);
+    }
+}
+
+static bool display_game_rects_overlap(int ax,
+                                       int ay,
+                                       int aw,
+                                       int ah,
+                                       int bx,
+                                       int by,
+                                       int bw,
+                                       int bh)
+{
+    return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+}
+
+static void display_game_update(void)
+{
+    if (!s_game.active || s_game.game_over) {
+        return;
+    }
+
+    s_game.player_y += s_game.velocity_y;
+    s_game.velocity_y += 2;
+    int ground_player_y = DISPLAY_GAME_GROUND_Y - DISPLAY_GAME_PLAYER_H;
+    if (s_game.player_y >= ground_player_y) {
+        s_game.player_y = ground_player_y;
+        s_game.velocity_y = 0;
+        s_game.jumps_used = 0;
+    }
+
+    int farthest_x = DISPLAY_H_RES;
+    for (size_t i = 0; i < DISPLAY_GAME_OBSTACLE_COUNT; ++i) {
+        if (s_game.obstacles[i].x > farthest_x) {
+            farthest_x = s_game.obstacles[i].x;
+        }
+    }
+
+    int speed = 3 + (int)(s_game.score / 120U);
+    if (speed > 6) {
+        speed = 6;
+    }
+
+    for (size_t i = 0; i < DISPLAY_GAME_OBSTACLE_COUNT; ++i) {
+        display_game_obstacle_t *obstacle = &s_game.obstacles[i];
+        obstacle->x -= speed;
+        if (obstacle->x + obstacle->w < 0) {
+            display_game_place_obstacle(i, farthest_x + 42);
+            farthest_x = obstacle->x;
+        }
+
+        int obstacle_y = DISPLAY_GAME_GROUND_Y - obstacle->h;
+        if (display_game_rects_overlap(DISPLAY_GAME_PLAYER_X,
+                                       s_game.player_y,
+                                       DISPLAY_GAME_PLAYER_W,
+                                       DISPLAY_GAME_PLAYER_H,
+                                       obstacle->x,
+                                       obstacle_y,
+                                       obstacle->w,
+                                       obstacle->h)) {
+            s_game.game_over = true;
+            return;
+        }
+    }
+
+    s_game.score++;
+}
+
+static void display_render_game(uint32_t frame)
+{
+    (void)frame;
+
+    display_game_update();
+
+    lv_label_set_text(s_title_label, "");
+    lv_label_set_text(s_detail_label, "");
+    display_set_visible(s_status_label, true);
+    lv_obj_set_style_text_font(s_status_label, LV_FONT_DEFAULT, 0);
+
+    if (s_game.game_over) {
+        lv_label_set_text_fmt(s_status_label, "OVER %lu", (unsigned long)s_game.score);
+        lv_obj_align(s_status_label, LV_ALIGN_TOP_MID, 0, 1);
+    } else {
+        lv_label_set_text_fmt(s_status_label, "%lu", (unsigned long)s_game.score);
+        lv_obj_align(s_status_label, LV_ALIGN_TOP_RIGHT, -2, 1);
+    }
+
+    display_set_visible(s_game_ground, true);
+    lv_obj_set_pos(s_game_ground, 0, DISPLAY_GAME_GROUND_Y);
+    lv_obj_set_size(s_game_ground, DISPLAY_H_RES, 2);
+
+    display_set_visible(s_game_player, true);
+    lv_obj_set_pos(s_game_player, DISPLAY_GAME_PLAYER_X, s_game.player_y);
+    lv_obj_set_size(s_game_player, DISPLAY_GAME_PLAYER_W, DISPLAY_GAME_PLAYER_H);
+
+    for (size_t i = 0; i < DISPLAY_GAME_OBSTACLE_COUNT; ++i) {
+        const display_game_obstacle_t *obstacle = &s_game.obstacles[i];
+        display_set_visible(s_game_obstacles[i], true);
+        lv_obj_set_pos(s_game_obstacles[i],
+                       obstacle->x,
+                       DISPLAY_GAME_GROUND_Y - obstacle->h);
+        lv_obj_set_size(s_game_obstacles[i], obstacle->w, obstacle->h);
     }
 }
 
@@ -742,10 +944,20 @@ static void display_render_status(const char *title,
             lv_label_set_text(s_status_label, "");
             display_set_visible(s_status_label, false);
             display_set_visible(s_cinna_image, true);
+            if (s_cinnamoroll_stage2_blink_animation) {
+                uint32_t blink_frame = display_cinnamoroll_stage2_frame();
+                lv_image_set_src(s_cinna_image, s_cinnamoroll_frames[blink_frame]);
+            } else {
+                lv_image_set_src(s_cinna_image, &s_cinnamoroll_image_dsc);
+            }
             lv_obj_set_pos(s_cinna_image, 0, 0);
             lv_obj_move_foreground(s_cinna_image);
-            display_set_cinnamoroll_twinkle(frame);
-            display_set_cinnamoroll_blink(display_cinnamoroll_blink_closed(frame));
+            if (!s_cinnamoroll_stage2_blink_animation) {
+                display_set_cinnamoroll_twinkle(frame);
+                display_set_cinnamoroll_blink(display_cinnamoroll_blink_closed(frame));
+            }
+        } else if (status->state == DISPLAY_STATE_GAME) {
+            display_render_game(frame);
         } else if (status->state == DISPLAY_STATE_ERROR) {
             lv_label_set_text(s_status_label, "!");
             display_set_visible(s_status_label, true);
@@ -825,7 +1037,14 @@ static void display_task(void *arg)
         display_render_status(title, detail, &status, elapsed, total, frame);
 
         frame++;
-        vTaskDelay(pdMS_TO_TICKS(DISPLAY_UPDATE_MS));
+        uint32_t delay_ms = DISPLAY_UPDATE_MS;
+        if (status.state == DISPLAY_STATE_GAME) {
+            delay_ms = DISPLAY_GAME_UPDATE_MS;
+        } else if (status.state == DISPLAY_STATE_CINNAMOROLL &&
+                   s_cinnamoroll_stage2_blink_animation) {
+            delay_ms = DISPLAY_CINNA_STAGE2_UPDATE_MS;
+        }
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
     }
 }
 
@@ -871,11 +1090,17 @@ static esp_err_t display_create_lvgl_labels(void)
     for (size_t i = 0; i < DISPLAY_CINNA_PART_COUNT; ++i) {
         s_cinna_parts[i] = lv_obj_create(screen);
     }
+    s_game_player = lv_obj_create(screen);
+    s_game_ground = lv_obj_create(screen);
+    for (size_t i = 0; i < DISPLAY_GAME_OBSTACLE_COUNT; ++i) {
+        s_game_obstacles[i] = lv_obj_create(screen);
+    }
 
     if (s_title_label == NULL || s_detail_label == NULL || s_status_label == NULL ||
         s_cinna_image == NULL || s_cinna_eye_cover_l == NULL || s_cinna_eye_cover_r == NULL ||
         s_meter_bg == NULL || s_meter_fill == NULL || s_eye == NULL || s_eye_glint == NULL ||
-        s_dots[0] == NULL || s_dots[1] == NULL || s_dots[2] == NULL) {
+        s_dots[0] == NULL || s_dots[1] == NULL || s_dots[2] == NULL ||
+        s_game_player == NULL || s_game_ground == NULL) {
         lvgl_port_unlock();
         return ESP_ERR_NO_MEM;
     }
@@ -899,6 +1124,12 @@ static esp_err_t display_create_lvgl_labels(void)
     }
     for (size_t i = 0; i < DISPLAY_CINNA_PART_COUNT; ++i) {
         if (s_cinna_parts[i] == NULL) {
+            lvgl_port_unlock();
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    for (size_t i = 0; i < DISPLAY_GAME_OBSTACLE_COUNT; ++i) {
+        if (s_game_obstacles[i] == NULL) {
             lvgl_port_unlock();
             return ESP_ERR_NO_MEM;
         }
@@ -945,6 +1176,11 @@ static esp_err_t display_create_lvgl_labels(void)
                       i == DISPLAY_CINNA_HEART_R ||
                       i == DISPLAY_CINNA_HEART_B;
         display_set_box_style(s_cinna_parts[i], filled, LV_RADIUS_CIRCLE);
+    }
+    display_set_box_style(s_game_player, true, 0);
+    display_set_box_style(s_game_ground, true, 0);
+    for (size_t i = 0; i < DISPLAY_GAME_OBSTACLE_COUNT; ++i) {
+        display_set_box_style(s_game_obstacles[i], true, 0);
     }
 
     lv_label_set_text(s_title_label, "Ready");
@@ -1261,9 +1497,54 @@ void display_set_cinnamoroll_mode(bool enable)
     }
 
     if (enable) {
+        if (display_get_state() == DISPLAY_STATE_CINNAMOROLL) {
+            s_cinnamoroll_stage2_start_tick = xTaskGetTickCount();
+            s_cinnamoroll_stage2_blink_animation = true;
+            return;
+        }
+        s_cinnamoroll_stage2_blink_animation = false;
+        s_cinnamoroll_stage2_start_tick = 0;
         display_update_state(DISPLAY_STATE_CINNAMOROLL, 0, 0);
     } else if (display_get_state() == DISPLAY_STATE_CINNAMOROLL) {
+        s_cinnamoroll_stage2_blink_animation = false;
+        s_cinnamoroll_stage2_start_tick = 0;
         display_set_idle();
+    }
+}
+
+void display_set_game_mode(bool enable)
+{
+    if (!s_initialized) {
+        return;
+    }
+
+    if (enable) {
+        display_game_reset();
+        display_update_state(DISPLAY_STATE_GAME, 0, 0);
+    } else if (display_get_state() == DISPLAY_STATE_GAME) {
+        s_game.active = false;
+        display_set_idle();
+    }
+}
+
+void display_game_jump(void)
+{
+    if (!s_initialized || display_get_state() != DISPLAY_STATE_GAME) {
+        return;
+    }
+
+    if (s_game.game_over) {
+        display_game_reset();
+        return;
+    }
+
+    int ground_player_y = DISPLAY_GAME_GROUND_Y - DISPLAY_GAME_PLAYER_H;
+    if (s_game.player_y >= ground_player_y) {
+        s_game.velocity_y = -13;
+        s_game.jumps_used = 1;
+    } else if (s_game.jumps_used < 2) {
+        s_game.velocity_y = -11;
+        s_game.jumps_used = 2;
     }
 }
 

@@ -138,6 +138,8 @@ static const char *ble_serial_display_state_name(display_state_t state)
         return "clock";
     case DISPLAY_STATE_CINNAMOROLL:
         return "cinnamoroll";
+    case DISPLAY_STATE_GAME:
+        return "game";
     case DISPLAY_STATE_ERROR:
         return "error";
     default:
@@ -629,7 +631,9 @@ static void ble_serial_show_help(void)
     (void)ble_serial_send_line("Status and display:");
     (void)ble_serial_send_line("  status - show wifi, power, display, audio, and timeout status");
     (void)ble_serial_send_line("  display dog|clock|guide|status - switch display page");
-    (void)ble_serial_send_line("  exit - leave dog, clock, guide, or status page and return to idle");
+    (void)ble_serial_send_line("  game - start jump obstacle game");
+    (void)ble_serial_send_line("  jump - jump in game; restart after game over");
+    (void)ble_serial_send_line("  exit - leave dog, clock, guide, status, or game page and return to idle");
     (void)ble_serial_send_line("Config and power:");
     (void)ble_serial_send_line("  config wifi - enter Wi-Fi configuration mode");
     (void)ble_serial_send_line("  config power-timeout <stage1_sec> <stage2_sec> - set idle timers");
@@ -776,6 +780,11 @@ static void ble_serial_handle_exit_command(void)
         (void)ble_serial_send_line("exit idle");
         break;
 
+    case DISPLAY_STATE_GAME:
+        display_set_game_mode(false);
+        (void)ble_serial_send_line("exit idle");
+        break;
+
     default: {
         char reply[48];
         snprintf(reply, sizeof(reply), "exit ignored state=%s",
@@ -836,6 +845,22 @@ static void ble_serial_handle_command(char *line)
         }
     } else if (strcasecmp(name, "display") == 0) {
         ble_serial_handle_display_command(args);
+    } else if (strcasecmp(name, "game") == 0) {
+        if (args != NULL && args[0] != '\0') {
+            (void)ble_serial_send_line("ERR usage: game");
+        } else {
+            display_set_game_mode(true);
+            (void)ble_serial_send_line("game start");
+        }
+    } else if (strcasecmp(name, "jump") == 0) {
+        if (args != NULL && args[0] != '\0') {
+            (void)ble_serial_send_line("ERR usage: jump");
+        } else if (display_get_state() != DISPLAY_STATE_GAME) {
+            (void)ble_serial_send_line("ERR game not running");
+        } else {
+            display_game_jump();
+            (void)ble_serial_send_line("jump");
+        }
     } else if (strcasecmp(name, "exit") == 0) {
         ble_serial_handle_exit_command();
     } else if (strcasecmp(name, "rst") == 0) {
