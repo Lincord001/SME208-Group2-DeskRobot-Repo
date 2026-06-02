@@ -11,12 +11,16 @@
 #define DASHSCOPE_API_KEY ""
 #endif
 
-#ifndef DASHSCOPE_LLM_URL
-#define DASHSCOPE_LLM_URL "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+#ifndef DEEPSEEK_API_KEY
+#define DEEPSEEK_API_KEY ""
 #endif
 
-#ifndef DASHSCOPE_LLM_MODEL
-#define DASHSCOPE_LLM_MODEL "qwen3.6-flash-2026-04-16"
+#ifndef DEEPSEEK_LLM_URL
+#define DEEPSEEK_LLM_URL "https://api.deepseek.com/chat/completions"
+#endif
+
+#ifndef DEEPSEEK_LLM_MODEL
+#define DEEPSEEK_LLM_MODEL "deepseek-v4-pro"
 #endif
 
 #ifndef DASHSCOPE_ASR_URL
@@ -40,14 +44,19 @@ const char *api_config_get_dashscope_api_key(void)
     return DASHSCOPE_API_KEY;
 }
 
+const char *api_config_get_llm_api_key(void)
+{
+    return DEEPSEEK_API_KEY;
+}
+
 const char *api_config_get_llm_url(void)
 {
-    return DASHSCOPE_LLM_URL;
+    return DEEPSEEK_LLM_URL;
 }
 
 const char *api_config_get_llm_model(void)
 {
-    return DASHSCOPE_LLM_MODEL;
+    return DEEPSEEK_LLM_MODEL;
 }
 
 const char *api_config_get_asr_url(void)
@@ -73,5 +82,11 @@ int api_config_get_http_timeout_ms(void)
 bool api_config_has_dashscope_api_key(void)
 {
     const char *key = api_config_get_dashscope_api_key();
+    return key != NULL && key[0] != '\0' && strcmp(key, "PLEASE_SET_YOUR_API_KEY") != 0;
+}
+
+bool api_config_has_llm_api_key(void)
+{
+    const char *key = api_config_get_llm_api_key();
     return key != NULL && key[0] != '\0' && strcmp(key, "PLEASE_SET_YOUR_API_KEY") != 0;
 }

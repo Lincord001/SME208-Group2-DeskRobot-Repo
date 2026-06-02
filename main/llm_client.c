@@ -66,18 +66,18 @@ static char *llm_build_request_body(const char *user_text)
     cJSON *messages = cJSON_CreateArray();
     cJSON *system_message = cJSON_CreateObject();
     cJSON *message = cJSON_CreateObject();
-    cJSON *extra_body = cJSON_CreateObject();
+    cJSON *thinking = cJSON_CreateObject();
     if (root == NULL || messages == NULL || system_message == NULL ||
-        message == NULL || extra_body == NULL) {
+        message == NULL || thinking == NULL) {
         goto fail;
     }
 
     cJSON_AddStringToObject(root, "model", api_config_get_llm_model());
     cJSON_AddBoolToObject(root, "stream", false);
     cJSON_AddNumberToObject(root, "max_tokens", LLM_MAX_COMPLETION_TOKENS);
-    cJSON_AddBoolToObject(extra_body, "enable_thinking", false);
-    cJSON_AddItemToObject(root, "extra_body", extra_body);
-    extra_body = NULL;
+    cJSON_AddStringToObject(thinking, "type", "disabled");
+    cJSON_AddItemToObject(root, "thinking", thinking);
+    thinking = NULL;
 
     cJSON_AddStringToObject(system_message, "role", "system");
     cJSON_AddStringToObject(system_message, "content", LLM_SYSTEM_PROMPT);
@@ -100,7 +100,7 @@ fail:
     cJSON_Delete(messages);
     cJSON_Delete(system_message);
     cJSON_Delete(message);
-    cJSON_Delete(extra_body);
+    cJSON_Delete(thinking);
     return NULL;
 }
 
@@ -189,8 +189,8 @@ static esp_err_t llm_parse_reply(const char *response_json, char *out_reply, siz
 
 esp_err_t llm_client_init(void)
 {
-    if (!api_config_has_dashscope_api_key()) {
-        ESP_LOGW(TAG, "DashScope API key is not configured");
+    if (!api_config_has_llm_api_key()) {
+        ESP_LOGW(TAG, "LLM API key is not configured");
     }
     return ESP_OK;
 }
@@ -212,7 +212,7 @@ esp_err_t llm_client_chat_with_cancel(const char *user_text,
 
     out_reply[0] = '\0';
 
-    if (!api_config_has_dashscope_api_key()) {
+    if (!api_config_has_llm_api_key()) {
         ESP_LOGE(TAG, "Missing API key. Create main/api_config_private.h from the example file.");
         return ESP_ERR_INVALID_STATE;
     }
@@ -254,7 +254,7 @@ esp_err_t llm_client_chat_with_cancel(const char *user_text,
     }
 
     char auth_header[192];
-    snprintf(auth_header, sizeof(auth_header), "Bearer %s", api_config_get_dashscope_api_key());
+    snprintf(auth_header, sizeof(auth_header), "Bearer %s", api_config_get_llm_api_key());
 
     esp_http_client_set_method(client, HTTP_METHOD_POST);
     esp_http_client_set_header(client, "Authorization", auth_header);
