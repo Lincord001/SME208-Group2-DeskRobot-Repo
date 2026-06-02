@@ -54,6 +54,9 @@
 #define DISPLAY_GAME_PLAYER_W 8
 #define DISPLAY_GAME_PLAYER_H 12
 #define DISPLAY_GAME_OBSTACLE_COUNT 3
+#define DISPLAY_GAME_OBSTACLE_START_GAP 72
+#define DISPLAY_GAME_OBSTACLE_RESPAWN_GAP 68
+#define DISPLAY_GAME_OBSTACLE_GAP_JITTER 30
 
 #define SSD1306_CMD_SEG_REMAP_NORMAL   0xA0
 #define SSD1306_CMD_SEG_REMAP_REVERSE  0xA1
@@ -616,7 +619,7 @@ static void display_game_place_obstacle(size_t index, int base_x)
     uint32_t value = display_game_next_random();
     size_t size = (value >> 8) % 3U;
 
-    s_game.obstacles[index].x = base_x + (int)(value % 22U);
+    s_game.obstacles[index].x = base_x + (int)(value % DISPLAY_GAME_OBSTACLE_GAP_JITTER);
     s_game.obstacles[index].w = widths[size];
     s_game.obstacles[index].h = heights[size];
 }
@@ -635,7 +638,9 @@ static void display_game_reset(void)
     }
 
     for (size_t i = 0; i < DISPLAY_GAME_OBSTACLE_COUNT; ++i) {
-        display_game_place_obstacle(i, DISPLAY_H_RES + 36 + (int)i * 48);
+        display_game_place_obstacle(i,
+                                    DISPLAY_H_RES + 36 +
+                                        (int)i * DISPLAY_GAME_OBSTACLE_START_GAP);
     }
 }
 
@@ -682,7 +687,8 @@ static void display_game_update(void)
         display_game_obstacle_t *obstacle = &s_game.obstacles[i];
         obstacle->x -= speed;
         if (obstacle->x + obstacle->w < 0) {
-            display_game_place_obstacle(i, farthest_x + 42);
+            display_game_place_obstacle(i,
+                                        farthest_x + DISPLAY_GAME_OBSTACLE_RESPAWN_GAP);
             farthest_x = obstacle->x;
         }
 
